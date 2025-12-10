@@ -1,0 +1,34 @@
+# 数据配置文件
+data:
+  # QLib数据路径
+  qlib_data_path: "/home/zhenhai1/quantitative/qlib_data/cn_data"
+
+  # 原始数据路径
+  raw_data_path: "/home/zhenhai1/quantitative/data/download_data"
+
+  # 申万行业数据路径
+  shenwan_path: "/home/zhenhai1/quantitative/data/download_data/shenwan/download_shenwan_stock_df_L1_L2_L3.csv"
+
+  # 指数成分股路径
+  instruments:
+    csi1000: "/home/zhenhai1/quantitative/qlib_data/cn_data/instruments/csi1000.txt"
+    csi300: "/home/zhenhai1/quantitative/qlib_data/cn_data/instruments/csi300.txt"
+    csi500: "/home/zhenhai1/quantitative/qlib_data/cn_data/instruments/csi500.txt"
+
+# 基准指数配置
+benchmarks:
+  market_benchmark: "sh000300"  # 沪深300作为市场基准
+  strategy_benchmark: "sh000852"  # 中证1000作为策略基准
+
+# 数据字段映射
+fields:
+  price:
+    close: "$close"
+    open: "$open"
+    high: "$high"
+    low: "$low"
+    volume: "$volume"
+
+  market_cap:
+    total_mv: "$total_mv"
+    circ_mv: "$circ_mv"

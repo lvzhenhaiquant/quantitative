@@ -1,0 +1,50 @@
+# 回测配置文件
+
+backtest:
+  # ========== 基本配置 ==========
+  initial_cash: 10000000  # 初始资金: 1000万
+
+  # ========== 交易成本 ==========
+  transaction:
+    commission_rate: 0.0003  # 手续费率: 万3
+    min_commission: 5        # 最小手续费: 5元
+    stamp_tax: 0.001         # 印花税: 千1 (仅卖出)
+    slippage: 0.001          # 滑点: 千1
+
+  # ========== 选股配置 ==========
+  selection:
+    method: "top_n"          # 选股方法: top_n (TopN选股) / quantile (分位数)
+    n_stocks: 50             # 选股数量 (method=top_n时有效)
+    quantile: 0.2            # 分位数阈值 (method=quantile时有效)
+    ascending: true          # true=因子值从小到大排序 (低波动), false=从大到小
+
+  # ========== 权重配置 ==========
+  weighting:
+    method: "equal"          # 权重方法: equal (等权) / factor_weighted (因子加权) / market_cap (市值加权)
+
+  # ========== 调仓频率 ==========
+  rebalance:
+    freq: "weekly"           # 调仓频率: daily / weekly / monthly
+
+  # ========== 风险控制 ==========
+  risk:
+    max_position: 0.05       # 单只股票最大仓位: 5%
+    min_position: 0.01       # 单只股票最小仓位: 1%
+    max_turnover: 1.0        # 单次最大换手率: 100%
+    stop_loss: null          # 止损线 (null=不设置, -0.1=10%止损)
+
+  # ========== 基准配置 ==========
+  benchmark:
+    code: "sh000300"         # 基准指数代码
+    name: "沪深300"
+
+  # ========== 输出配置 ==========
+  output:
+    save_trades: true        # 是否保存交易记录
+    save_positions: true     # 是否保存持仓记录
+    save_dir: "/home/zhenhai1/quantitative/backtest/results"
+
+  # ========== 其他配置 ==========
+  other:
+    allow_short: false       # 是否允许做空
+    trade_at_close: true     # 是否在收盘价交易 (true=收盘价, false=开盘价)

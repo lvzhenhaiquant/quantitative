@@ -1,0 +1,60 @@
+# 因子配置文件
+
+# Beta因子配置
+beta_factor:
+  name: "beta"
+  description: "个股相对市场基准的敏感度"
+
+  # 参数配置
+  params:
+    lookback_days: 251      # 回看天数（1年交易日）
+    half_life: 63           # 半衰期（季度）
+    benchmark: "sh000300"   # 基准指数（沪深300）
+    min_valid_days: 50      # 最少有效数据点
+
+  # 数据预处理
+  preprocess:
+    winsorize: true         # 是否去极值
+    winsorize_std: 3        # 去极值的标准差倍数
+    fillna_method: "mean"   # 缺失值填充方法：mean/median/zero
+
+  # 数据后处理
+  postprocess:
+    standardize: true       # 是否标准化
+    neutralize:             # 中性化配置
+      industry: true        # 行业中性化
+      market_cap: true      # 市值中性化
+
+# 历史波动率因子配置
+history_sigma_factor:
+  name: "history_sigma"
+  description: "个股特质波动率（回归残差标准差）"
+
+  params:
+    lookback_days: 251
+    half_life: 63
+    benchmark: "sh000300"
+    min_valid_days: 50
+
+  preprocess:
+    winsorize: true
+    winsorize_std: 3
+    fillna_method: "mean"
+
+  postprocess:
+    standardize: true
+    neutralize:
+      industry: true
+      market_cap: true
+
+# 因子通用配置
+common:
+  # 缓存配置
+  cache:
+    enabled: true
+    path: "/home/zhenhai1/quantitative/factor_production/cache"
+
+  # 日志配置
+  logging:
+    level: "INFO"
+    format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

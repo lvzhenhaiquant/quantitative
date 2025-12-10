@@ -1,0 +1,47 @@
+# 因子调度器配置
+
+scheduler:
+  # 因子保存路径
+  factor_save_dir: "/home/zhenhai1/quantitative/factor_production/cache"
+
+  # 存储格式配置
+  storage:
+    format: "csv"  # csv, hdf5, parquet
+    compression: null  # 压缩方式: gzip, bz2, xz (csv适用)
+
+  # 文件命名规则
+  naming:
+    # 格式: {factor_name}_{freq}_{start_date}_{end_date}.csv
+    # 例如: history_sigma_daily_20191210_20241210.csv
+    pattern: "{factor_name}_{freq}_{start_date}_{end_date}"
+    date_format: "%Y%m%d"  # 日期格式
+
+  # 增量更新配置
+  incremental:
+    enabled: true
+    # 增量更新时的回溯天数（防止数据缺失）
+    lookback_buffer: 5
+
+  # 性能优化
+  performance:
+    # 批量大小（每次处理多少个交易日）
+    batch_size: 10
+    # 是否显示进度条
+    show_progress: true
+    # 每计算N个日期保存一次（防止中断丢失数据）
+    save_interval: 50
+
+  # 容错配置
+  error_handling:
+    # 遇到错误时是否继续
+    continue_on_error: true
+    # 最大重试次数
+    max_retries: 3
+    # 重试间隔（秒）
+    retry_delay: 5
+
+  # 日志配置
+  logging:
+    level: "INFO"
+    # 是否保存详细的调度日志
+    save_schedule_log: true
