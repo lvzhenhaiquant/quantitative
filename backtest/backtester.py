@@ -9,16 +9,22 @@
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Any
+from typing import Dict, List
 import os
 import sys
 from datetime import datetime
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.logger import get_logger
 from utils.data_loader import DataLoader
+
+# 设置中文字体
+plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']  # 用黑体显示中文
+plt.rcParams['axes.unicode_minus'] = False  # 正常显示负号
 
 
 class Portfolio:
@@ -99,11 +105,22 @@ class Portfolio:
         # 1. 卖出不在目标组合中的股票
         for stock in list(self.positions.keys()):
             if stock not in target_positions:
-                self._sell(stock, self.positions[stock], prices[stock], date)
+                # 检查价格是否有效
+                if stock in prices and not pd.isna(prices[stock]) and prices[stock] > 0:
+                    self._sell(stock, self.positions[stock], prices[stock], date)
+                else:
+                    # 价格无效（如停牌），强制清仓（按0处理或保留持仓）
+                    # 这里选择强制清仓，以免影响组合
+                    if stock in self.positions:
+                        del self.positions[stock]
 
         # 2. 调整现有持仓
         for stock in list(self.positions.keys()):
             if stock in target_positions:
+                # 检查价格是否有效
+                if stock not in prices or pd.isna(prices[stock]) or prices[stock] <= 0:
+                    continue  # 价格无效，跳过调整
+
                 current_shares = self.positions[stock]
                 target_shares = target_positions[stock]
 
@@ -117,7 +134,9 @@ class Portfolio:
         # 3. 买入新股票
         for stock, shares in target_positions.items():
             if stock not in self.positions and shares > 0:
-                self._buy(stock, shares, prices[stock], date)
+                # 检查价格是否有效
+                if stock in prices and not pd.isna(prices[stock]) and prices[stock] > 0:
+                    self._buy(stock, shares, prices[stock], date)
 
     def _buy(self, stock: str, shares: int, price: float, date: str):
         """买入"""
@@ -254,26 +273,28 @@ class PerformanceAnalyzer:
         dict
             业绩指标
         """
-        # 计算收益率
-        portfolio_returns = self._calculate_returns(portfolio_values['total_value'])
-        benchmark_returns = self._calculate_returns(benchmark_values)
+        # 对齐日期：只保留portfolio有数据的日期
+        portfolio_dates = pd.to_datetime(portfolio_values['date'])
+        benchmark_aligned = benchmark_values.loc[portfolio_dates]
 
-        # 对齐日期
-        portfolio_returns.index = pd.to_datetime(portfolio_values['date'])
-        benchmark_returns.index = pd.to_datetime(benchmark_values.index)
+        # 归一化：都除以第一个值，保证同一起点
+        portfolio_nav = portfolio_values['total_value'].values / portfolio_values['total_value'].values[0]
+        benchmark_nav = benchmark_aligned.values / benchmark_aligned.values[0]
 
-        # 取交集
-        common_dates = portfolio_returns.index.intersection(benchmark_returns.index)
-        portfolio_returns = portfolio_returns.loc[common_dates]
-        benchmark_returns = benchmark_returns.loc[common_dates]
+        # 计算收益率（用于波动率、夏普比率等指标）
+        portfolio_returns = pd.Series(portfolio_nav).pct_change().fillna(0)
+        benchmark_returns = pd.Series(benchmark_nav).pct_change().fillna(0)
+
+        portfolio_returns.index = portfolio_dates
+        benchmark_returns.index = portfolio_dates
 
         # 计算指标
         metrics = {}
 
-        # 1. 累计收益
-        metrics['total_return'] = self._total_return(portfolio_returns)
-        metrics['benchmark_return'] = self._total_return(benchmark_returns)
-        metrics['excess_return'] = metrics['total_return'] - metrics['benchmark_return']
+        # 1. 累计收益率（减1转为收益率）
+        metrics['total_return'] = portfolio_nav[-1] - 1  # 策略累计收益率
+        metrics['benchmark_return'] = benchmark_nav[-1] - 1  # 基准累计收益率
+        metrics['excess_return'] = (portfolio_nav[-1] - 1) - (benchmark_nav[-1] - 1)  # 超额收益率
 
         # 2. 年化收益
         metrics['annual_return'] = self._annual_return(portfolio_returns)
@@ -371,13 +392,15 @@ class Backtester:
         self.ascending = config.get('selection', {}).get('ascending', True)
         self.weighting_method = config.get('weighting', {}).get('method', 'equal')
         self.rebalance_freq = config.get('rebalance', {}).get('freq', 'weekly')
-        self.benchmark_code = config.get('benchmark', {}).get('code', 'sh000300')
+        self.benchmark_code = config.get('benchmark', {}).get('code', 'sh000852')  # 默认中证1000
+        self.trade_at_open = config.get('execution', {}).get('trade_at_open', True)  # 默认开盘价交易
 
         # 创建结果保存目录
         self.save_dir = config.get('output', {}).get('save_dir', 'backtest/results')
         os.makedirs(self.save_dir, exist_ok=True)
 
         self.logger.info("Backtester初始化完成")
+        self.logger.info(f"交易时机: {'开盘价' if self.trade_at_open else '收盘价'}")
 
     def run(self, factor_name: str, factor_data: pd.DataFrame = None) -> Dict:
         """
@@ -489,6 +512,9 @@ class Backtester:
 
         self._save_results(results, factor_name)
 
+        # 9. 绘制策略曲线
+        self._plot_performance(portfolio_values, benchmark_data, factor_name)
+
         return results
 
     def _get_rebalance_dates(self, factor_data: pd.DataFrame) -> List[str]:
@@ -540,19 +566,22 @@ class Backtester:
             raise ValueError(f"不支持的权重方法: {self.weighting_method}")
 
     def _load_prices(self, stocks: List[str], date: str) -> Dict[str, float]:
-        """加载指定日期的股票价格"""
+        """加载指定日期的股票价格（根据配置使用开盘价或收盘价）"""
+        # 根据配置选择价格字段
+        price_field = '$open' if self.trade_at_open else '$close'
+
         prices_df = self.data_loader.load_stock_prices(
             stock_list=stocks,
             start_date=date,
             end_date=date,
-            fields=['$close']
+            fields=[price_field]
         )
 
         prices = {}
         for stock in stocks:
             try:
                 if stock in prices_df.index.get_level_values(0):
-                    price = prices_df.loc[stock]['$close']
+                    price = prices_df.loc[stock][price_field]
                     if isinstance(price, pd.Series):
                         price = price.iloc[0] if len(price) > 0 else np.nan
                     prices[stock] = price
@@ -578,8 +607,104 @@ class Backtester:
         self.logger.info(f"卡玛比率: {metrics['calmar_ratio']:.4f}")
         self.logger.info("=" * 80)
 
+    def _plot_performance(self, portfolio_values: pd.DataFrame,
+                         benchmark_data: pd.Series,
+                         factor_name: str):
+        """
+        Plot strategy performance curves
+
+        Parameters
+        ----------
+        portfolio_values : DataFrame
+            Portfolio value data
+        benchmark_data : Series
+            Benchmark data
+        factor_name : str
+            Factor name
+        """
+        self.logger.info("\nPlotting performance curves...")
+
+        # Prepare data
+        dates = pd.to_datetime(portfolio_values['date'])
+        strategy_values = portfolio_values['total_value'].values
+
+        # Align benchmark data
+        benchmark_aligned = benchmark_data.loc[dates].values
+
+        # Normalize to same starting point (all start from 1)
+        strategy_nav = strategy_values / strategy_values[0]
+        benchmark_nav = benchmark_aligned / benchmark_aligned[0]
+        excess_nav = strategy_nav / benchmark_nav  # Excess return NAV
+
+        # Create figure
+        fig, ax = plt.subplots(figsize=(14, 7))
+
+        # Plot three curves
+        ax.plot(dates, strategy_nav, label='Strategy NAV', linewidth=2, color='#1f77b4')
+        ax.plot(dates, benchmark_nav, label='Benchmark NAV (CSI 1000)', linewidth=2, color='#ff7f0e', linestyle='--')
+        ax.plot(dates, excess_nav, label='Excess Return NAV', linewidth=2, color='#2ca02c', alpha=0.7)
+
+        # Add baseline
+        ax.axhline(y=1, color='gray', linestyle='-', linewidth=0.8, alpha=0.5)
+
+        # Set title and labels
+        ax.set_title(f'{factor_name} Strategy Performance (Benchmark: CSI 1000)', fontsize=16, fontweight='bold', pad=20)
+        ax.set_xlabel('Date', fontsize=12)
+        ax.set_ylabel('NAV (Normalized)', fontsize=12)
+
+        # Set legend
+        ax.legend(loc='upper left', fontsize=11, framealpha=0.9)
+
+        # Set grid
+        ax.grid(True, alpha=0.3, linestyle='--')
+
+        # Format date axis
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+        plt.xticks(rotation=45)
+
+        # Tight layout
+        plt.tight_layout()
+
+        # Save plot
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        plot_path = os.path.join(self.save_dir, f"{factor_name}_performance_{timestamp}.png")
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        self.logger.info(f"Performance plot saved: {plot_path}")
+
+        # Display plot (if in interactive environment)
+        # plt.show()
+        plt.close()
+
+        return plot_path
+
     def _save_results(self, results: Dict, factor_name: str):
-        """保存回测结果"""
+        """保存回测结果（保存前自动清理相同因子的旧文件）"""
+        # 清理相同因子名的旧文件（包括CSV和PNG）
+        import glob
+
+        patterns = [
+            f'{factor_name}_values_*.csv',
+            f'{factor_name}_trades_*.csv',
+            f'{factor_name}_metrics_*.csv',
+            f'{factor_name}_performance_*.png'
+        ]
+
+        old_files = []
+        for pattern in patterns:
+            old_files.extend(glob.glob(os.path.join(self.save_dir, pattern)))
+
+        if old_files:
+            self.logger.info(f"\n发现 {len(old_files)} 个旧的 {factor_name} 回测文件，正在清理...")
+            for old_file in old_files:
+                try:
+                    file_size = os.path.getsize(old_file) / (1024 * 1024)  # MB
+                    os.remove(old_file)
+                    self.logger.info(f"  ✓ 已删除: {os.path.basename(old_file)} ({file_size:.2f} MB)")
+                except Exception as e:
+                    self.logger.warning(f"  ✗ 删除失败: {os.path.basename(old_file)} - {e}")
+
+        # 生成新的时间戳
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
         # 保存净值曲线

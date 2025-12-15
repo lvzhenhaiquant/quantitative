@@ -14,8 +14,11 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any
 import os
 import sys
+import glob
 from tqdm import tqdm
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,6 +26,88 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.logger import get_logger
 from utils.data_loader import DataLoader
 from factor_production.base_factor import BaseFactor
+
+
+def _calculate_single_day(args):
+    """
+    单个交易日的因子计算（用于多进程）
+
+    Parameters
+    ----------
+    args : tuple
+        包含所有计算所需的参数
+
+    Returns
+    -------
+    dict
+        包含结果或错误信息的字典
+    """
+    (day_index, rebalance_date, prev_date, stock_list,
+     data_start_date, factor_params, factor_class_name,
+     data_loader_config, max_retries, retry_delay) = args
+
+    try:
+        # 在子进程中重新创建数据加载器和因子实例
+        from utils.data_loader import DataLoader
+        from factor_production.market_factors.beta_factor import HistorySigmaFactor, BetaFactor
+
+        data_loader = DataLoader()
+
+        # 根据因子名称创建因子实例
+        if factor_class_name == 'HistorySigmaFactor':
+            factor = HistorySigmaFactor(factor_params)
+        elif factor_class_name == 'BetaFactor':
+            factor = BetaFactor(factor_params)
+        else:
+            raise ValueError(f"未知的因子类型: {factor_class_name}")
+
+        # 重试机制
+        for attempt in range(max_retries):
+            try:
+                factor_values = factor.calculate(
+                    stock_list=stock_list,
+                    start_date=data_start_date,
+                    end_date=prev_date,
+                    data_loader=data_loader
+                )
+
+                if factor_values is not None and len(factor_values) > 0:
+                    # 添加日期列
+                    factor_values['date'] = rebalance_date
+
+                    return {
+                        'success': True,
+                        'day_index': day_index,
+                        'date': rebalance_date,
+                        'data': factor_values,
+                        'n_stocks': len(factor_values)
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'day_index': day_index,
+                        'date': rebalance_date,
+                        'error': '因子计算结果为空'
+                    }
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    return {
+                        'success': False,
+                        'day_index': day_index,
+                        'date': rebalance_date,
+                        'error': str(e)
+                    }
+
+    except Exception as e:
+        return {
+            'success': False,
+            'day_index': day_index,
+            'date': rebalance_date,
+            'error': str(e)
+        }
 
 
 class FactorScheduler:
@@ -225,6 +310,168 @@ class FactorScheduler:
 
         return save_path
 
+    def daily_calculate_parallel(self,
+                                 factor: BaseFactor,
+                                 instrument_name: str,
+                                 start_date: str,
+                                 end_date: str,
+                                 n_jobs: int = -1) -> str:
+        """
+        并行计算每日因子（多核加速版本）
+
+        Parameters
+        ----------
+        factor : BaseFactor
+            因子实例
+        instrument_name : str
+            股票池名称
+        start_date : str
+            开始日期
+        end_date : str
+            结束日期
+        n_jobs : int
+            并行进程数，-1表示使用所有CPU核心
+
+        Returns
+        -------
+        str
+            保存的文件路径
+        """
+        self.logger.info("=" * 80)
+        self.logger.info(f"开始多核并行计算因子: {factor.name}")
+        self.logger.info(f"股票池: {instrument_name}")
+        self.logger.info(f"日期范围: {start_date} ~ {end_date}")
+
+        # 确定使用的核心数
+        if n_jobs == -1:
+            n_jobs = multiprocessing.cpu_count()
+        self.logger.info(f"使用 {n_jobs} 个CPU核心并行计算")
+        self.logger.info("=" * 80)
+
+        # Step 1: 获取交易日历
+        trading_days = self._get_trading_days(start_date, end_date)
+        total_days = len(trading_days)
+        self.logger.info(f"共 {total_days} 个交易日需要计算")
+
+        # 获取因子参数
+        lookback_days = factor.lookback_days
+        buffer_days = 50
+        factor_params = factor.params
+        factor_class_name = factor.__class__.__name__
+
+        # Step 2: 准备所有任务参数
+        tasks = []
+        for i, rebalance_date in enumerate(trading_days, 1):
+            try:
+                rebalance_date_str = rebalance_date.strftime('%Y-%m-%d')
+
+                # 获取成分股
+                stock_list = self.data_loader.get_stock_list_by_date(
+                    instrument_name,
+                    rebalance_date_str
+                )
+
+                if len(stock_list) == 0:
+                    continue
+
+                # 计算日期
+                date_index = trading_days.get_loc(rebalance_date)
+
+                if date_index == 0:
+                    continue  # 跳过第一个交易日
+
+                start_index = max(0, date_index - lookback_days - buffer_days)
+                data_start_date = trading_days[start_index].strftime('%Y-%m-%d')
+                prev_date = trading_days[date_index - 1].strftime('%Y-%m-%d')
+
+                # 添加任务
+                task = (
+                    i, rebalance_date_str, prev_date, stock_list,
+                    data_start_date, factor_params, factor_class_name,
+                    None,  # data_loader_config (在子进程中重新创建)
+                    self.max_retries, self.retry_delay
+                )
+                tasks.append(task)
+
+            except Exception as e:
+                self.logger.warning(f"准备任务失败 {rebalance_date_str}: {e}")
+                continue
+
+        self.logger.info(f"共准备 {len(tasks)} 个计算任务")
+
+        # Step 3: 并行执行
+        all_results = []
+        success_count = 0
+        fail_count = 0
+
+        # 使用ProcessPoolExecutor并行计算
+        with ProcessPoolExecutor(max_workers=n_jobs) as executor:
+            # 提交所有任务
+            futures = {executor.submit(_calculate_single_day, task): task
+                      for task in tasks}
+
+            # 使用tqdm显示进度
+            with tqdm(total=len(futures), desc=f"并行计算{factor.name}",
+                     disable=not self.show_progress) as pbar:
+
+                # 按完成顺序收集结果
+                for future in as_completed(futures):
+                    result = future.result()
+
+                    if result['success']:
+                        all_results.append((result['day_index'], result['data']))
+                        success_count += 1
+                        pbar.set_postfix({
+                            'success': success_count,
+                            'fail': fail_count,
+                            'stocks': result['n_stocks']
+                        })
+                    else:
+                        fail_count += 1
+                        self.logger.warning(f"[{result['day_index']}] {result['date']}: {result.get('error', '未知错误')}")
+                        pbar.set_postfix({
+                            'success': success_count,
+                            'fail': fail_count
+                        })
+
+                    pbar.update(1)
+
+                    # 定期保存检查点
+                    if len(all_results) % self.save_interval == 0 and len(all_results) > 0:
+                        sorted_results = sorted(all_results, key=lambda x: x[0])
+                        checkpoint_data = pd.concat([r[1] for r in sorted_results], axis=0)
+                        latest_date = sorted_results[-1][1]['date'].iloc[0]
+                        self._save_checkpoint([checkpoint_data], factor.name,
+                                            start_date, latest_date)
+
+        # Step 4: 整理结果（按日期排序）
+        if len(all_results) == 0:
+            self.logger.error("没有成功计算任何因子值!")
+            return None
+
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info(f"并行计算完成!")
+        self.logger.info(f"成功: {success_count}期, 失败: {fail_count}期")
+        self.logger.info("=" * 80)
+
+        # 按 day_index 排序并合并结果
+        all_results.sort(key=lambda x: x[0])
+        final_result = pd.concat([r[1] for r in all_results], axis=0)
+
+        # 保存最终结果
+        save_path = self._save_factor_data(
+            factor_data=final_result,
+            factor_name=factor.name,
+            start_date=start_date,
+            end_date=end_date,
+            freq='daily'
+        )
+
+        # 打印统计信息
+        self._print_statistics(final_result, factor.name)
+
+        return save_path
+
     def _get_trading_days(self, start_date: str, end_date: str) -> pd.DatetimeIndex:
         """
         获取交易日历
@@ -344,7 +591,7 @@ class FactorScheduler:
                          end_date: str,
                          freq: str = 'daily') -> str:
         """
-        保存因子数据
+        保存因子数据（保存前自动清理相同因子的旧文件）
 
         Parameters
         ----------
@@ -364,6 +611,20 @@ class FactorScheduler:
         str
             保存路径
         """
+        # 清理相同因子名的旧文件（包括checkpoint文件）
+        pattern = os.path.join(self.factor_save_dir, f'{factor_name}*.{self.storage_format}')
+        old_files = glob.glob(pattern)
+
+        if old_files:
+            self.logger.info(f"\n发现 {len(old_files)} 个旧的 {factor_name} 因子文件，正在清理...")
+            for old_file in old_files:
+                try:
+                    file_size = os.path.getsize(old_file) / (1024 * 1024)  # MB
+                    os.remove(old_file)
+                    self.logger.info(f"  ✓ 已删除: {os.path.basename(old_file)} ({file_size:.1f} MB)")
+                except Exception as e:
+                    self.logger.warning(f"  ✗ 删除失败: {os.path.basename(old_file)} - {e}")
+
         # 生成文件名
         start_date_fmt = start_date.replace('-', '')
         end_date_fmt = end_date.replace('-', '')

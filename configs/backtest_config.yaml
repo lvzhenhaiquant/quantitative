@@ -35,8 +35,8 @@ backtest:
 
   # ========== 基准配置 ==========
   benchmark:
-    code: "sh000300"         # 基准指数代码
-    name: "沪深300"
+    code: "sh000852"         # 基准指数代码
+    name: "中证1000"
 
   # ========== 输出配置 ==========
   output:
@@ -44,7 +44,7 @@ backtest:
     save_positions: true     # 是否保存持仓记录
     save_dir: "/home/zhenhai1/quantitative/backtest/results"
 
-  # ========== 其他配置 ==========
-  other:
+  # ========== 交易时机配置 ==========
+  execution:
+    trade_at_open: true      # true=开盘价交易 (更符合逻辑), false=收盘价交易
     allow_short: false       # 是否允许做空
-    trade_at_close: true     # 是否在收盘价交易 (true=收盘价, false=开盘价)
