@@ -35,6 +35,7 @@ class DownloadDataFromTushare_Baostock:
         self.save_dir_balancesheet = './download_data/balancesheet'
         self.save_dir_basic_mins = './download_data/basic_mins'
         self.save_dir_shenwan = './download_data/shenwan'
+        self.save_dir_shenwan_daily = './download_data/shenwan_daily'
         self.save_dir_download_index = './download_data/origin_download_index'
         self.save_dir_index_daily = './download_data/index_daily'
 
@@ -1347,7 +1348,8 @@ class DownloadDataFromTushare_Baostock:
         # 10 按股票代码分组，批量保存
         self._save_substock_data(self.save_dir_basic_mins,file_name_mins_adjusted_df,0)
 
-    def download_tushare_shenwan_classify(self, ):
+    def download_tushare_shenwan_classify(self):
+        self.add_wanshen_classify(pd.DataFrame())
         file_name_shenwan_L1 = os.path.join(self.save_dir_shenwan, f'download_shenwan_classify_df_L1.csv')
         file_name_shenwan_L2 = os.path.join(self.save_dir_shenwan, f'download_shenwan_classify_df_L2.csv')
         file_name_shenwan_L3 = os.path.join(self.save_dir_shenwan, f'download_shenwan_classify_df_L3.csv')
@@ -1371,6 +1373,7 @@ class DownloadDataFromTushare_Baostock:
         print(f"数据保存成功：{file_name_shenwan_L2_df}")
         file_name_shenwan_L3_df.to_csv(file_name_shenwan_L3, index=False, encoding='utf-8-sig')
         print(f"数据保存成功：{file_name_shenwan_L3_df}")
+        
 
     def add_wanshen_classify(self, file_name_df):
         # 1. 定义文件路径
@@ -1378,7 +1381,11 @@ class DownloadDataFromTushare_Baostock:
         shenwan_industry_df = pd.DataFrame()  # 存储完整的行业分类数据
         missing_stocks = []  # 需要补充分类的股票列表
         # 2. 提取原始数据中所有有效股票
-        raw_stocks = file_name_df['ts_code'].dropna().drop_duplicates().tolist()
+        if len(file_name_df)>0:
+            raw_stocks = file_name_df['ts_code'].dropna().drop_duplicates().tolist()
+        else:
+            file_name_basic_df = self._get_stock_basic_df()
+            raw_stocks = file_name_basic_df['ts_code'].dropna().drop_duplicates().tolist()
         try:
             # 3. 读取已有分类文件（若存在），计算缺失股票
             if os.path.exists(shenwan_industry_file):
@@ -1416,7 +1423,10 @@ class DownloadDataFromTushare_Baostock:
                 print("无任何可用的行业分类数据，返回原数据")
                 return file_name_df
         # 5. 合并分类到原始数据框（左连接，保留原始所有记录，缺失分类为NaN）
-        file_name_df = file_name_df.merge(shenwan_industry_df, on='ts_code', how='left')
+        if len(file_name_df>0):
+            file_name_df = file_name_df.merge(shenwan_industry_df, on='ts_code', how='left')
+        else:
+            file_name_df = shenwan_industry_df
         return file_name_df
 
     def _get_index_member_all(self, stock_list):
@@ -2169,7 +2179,7 @@ class DownloadDataFromTushare_Baostock:
     def update_index_daily(self, start_date_str, end_date_str):
         index_mapping = self.index_mapping
         for index_name, index_code in tqdm(index_mapping.items(), desc="更新指数数据"):
-            file_prefix = f"{index_code}_"
+            file_prefix = f"index_daily_{index_code}_"
             old_file_name, old_df = self._utils_read_matched_csv_by_prefix(self.save_dir_download_index,file_prefix)
             if old_file_name is None:
                 print(f"\n指数{index_name}({index_code})无有效旧文件，跳过更新")
@@ -2228,5 +2238,97 @@ class DownloadDataFromTushare_Baostock:
         index_daily_df['trade_date'] = pd.to_datetime(index_daily_df['trade_date'], format='%Y%m%d')  # 统一日期
         print(f"index_daily_df 获取{len(index_daily_df)}条数据")
         return index_daily_df
+
+
+
+    def download_tushare_shenwan_daily(self, start_date_str, end_date_str):
+        file_name_shenwan_daily = os.path.join(self.save_dir_shenwan, f'download_shenwan_daily_df_{start_date_str}_{end_date_str}.parquet')
+        shenwan_exists = os.path.exists(file_name_shenwan_daily)
+        if shenwan_exists:
+            print("[download_tushare_shenwan_daily]文件已存在，无需重复处理，程序退出!")
+            return
+        # 日期子集跳出
+        file_name_shenwan_daily_df_prefix = 'download_shenwan_daily_df_'
+        file_name_shenwan_df_exist, temp1 = self._utils_read_matched_csv_by_prefix(self.save_dir_shenwan,file_name_shenwan_daily_df_prefix)
+        temp1 = pd.DataFrame()
+        if file_name_shenwan_df_exist:
+            print(f"{file_name_shenwan_df_exist}文件已存在，请使用增量下载")
+            return
+        # 分批获取sw指数权重
+        file_name_shenwan_daily_df = self._get_shenwan_daily_df( start_date_str, end_date_str)
+        if len(file_name_shenwan_daily_df) == 0:
+            print("获取日线数据为空，退出!")
+            return
+        file_name_shenwan_daily_df.to_parquet(file_name_shenwan_daily, index=False, engine='pyarrow')
+        file_name_shenwan_daily_df['ts_code'] = file_name_shenwan_daily_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
+        print(f"数据已保存至{file_name_shenwan_daily}，共{len(file_name_shenwan_daily_df)}条记录")
+        # 单独保存至单股文件夹
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            executor.submit(self._save_substock_data, self.save_dir_shenwan_daily, file_name_shenwan_daily_df, 0)
+        print("download_tushare_shenwan_daily 下载完成")
+
+    def _get_shenwan_daily_df(self, start_date_str, end_date_str):
+        current_start = pd.to_datetime(start_date_str)
+        total_end = pd.to_datetime(end_date_str)
+        shenwan_df = pd.DataFrame()
+        total_days = (total_end - current_start).days + 1
+        date_range = pd.date_range(start=start_date_str, end=end_date_str, freq='D').strftime('%Y%m%d')
+        successful_days = 0
+        # 使用 tqdm 创建进度条
+        for curr_date_str in tqdm(date_range, desc="获取申万指数数据"):
+            try:
+                temp_df = self.pro.sw_daily(trade_date=curr_date_str, fields='ts_code,trade_date,open,close')
+                # temp_df['trade_date'] = curr_date_str
+                if not temp_df.empty:
+                    shenwan_df = pd.concat([shenwan_df, temp_df], ignore_index=True)
+                    successful_days += 1
+                time.sleep(0.33)# 一分钟200次
+            except Exception as e:
+                print(f"获取指数日线失败（{curr_date_str}：{e}")
+        # 数据清洗
+        if not shenwan_df.empty:
+            index_shenwan_df = shenwan_df.drop_duplicates(subset=['ts_code','trade_date'])
+            index_shenwan_df = index_shenwan_df.sort_values(by='trade_date')
+            index_shenwan_df['trade_date'] = pd.to_datetime(index_shenwan_df['trade_date'], format='%Y%m%d').dt.strftime('%Y-%m-%d')
+            print(f"\n申万指数数据获取完成，共获取 {len(index_shenwan_df)} 条数据")
+        else:
+            index_shenwan_df = pd.DataFrame()
+            print("\n未获取到任何数据")
+        return index_shenwan_df
+
+
+
+    def update_tushare_shenwan_daily(self,start_date_str, end_date_str):
+        file_name_shenwan_daily_df_prefix = 'download_shenwan_daily_df_'
+        file_name_shenwan_daily, file_name_shenwan_daily_df = self._utils_read_matched_csv_by_prefix(self.save_dir_shenwan, file_name_shenwan_daily_df_prefix)
+        if len(file_name_shenwan_daily_df) == 0:
+            print(f"未读取到文件：{file_name_shenwan_daily_df_prefix},请先下载原始数据")
+            return
+
+        old_start_str, old_end_str = self._utils_extract_date_from_filename(file_name_shenwan_daily)
+        if file_name_shenwan_daily:
+            if (end_date_str == old_start_str and start_date_str < end_date_str) or (start_date_str == old_end_str and end_date_str > start_date_str):
+                print("下载日期正确")
+            else:
+                print("[ update_tushare_shenwan_daily ]下载日期设置错误")
+                return
+
+        missing_start_end_list = self._utils_get_missing_date_ranges(old_start_str, old_end_str, start_date_str, end_date_str)
+        begin_all_str = min(old_start_str, old_end_str, start_date_str, end_date_str)  # 所有日期首位相连或者重叠后的最边际日期
+        end_all_str = max(old_start_str, old_end_str, start_date_str, end_date_str)
+        for missing_start_str, missing_end_str in missing_start_end_list:
+            tmp_df = self._get_shenwan_daily_df(start_date_str, end_date_str)
+            if len(tmp_df) == 0:
+                print("获取日线数据为空{start_date_str} - {end_date_str}")
+
+            file_name_shenwan_daily_df = pd.concat(
+                [file_name_shenwan_daily_df, tmp_df],  # 先加原始数据，后加新数据
+                ignore_index=True,  # 重置索引（重要，避免索引冲突）
+                axis=0)  # 纵向追加（行级追加）
+        self._to_new_csv_and_delete_old(file_name_shenwan_daily, file_name_shenwan_daily_df, begin_all_str, end_all_str, self.save_dir_shenwan)
+        file_name_shenwan_daily_df['ts_code'] = file_name_shenwan_daily_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            executor.submit(self._save_substock_data, self.save_dir_shenwan_daily, file_name_shenwan_daily_df, 0)
+        print("update_tushare_shenwan_daily 下载完成")
 
 

@@ -11,8 +11,8 @@ from tqdm import tqdm
 
 class DataToQlib:
     def __init__(self, 
-        qlib_data_dir_path=r"/home/zhenhai1/quantitative/qlib_data/cn_data",
-        dump_bin_py_path=r"/home/zhenhai1/quantitative/venv/lib/python3.10/site-packages/qlib/scripts/dump_bin.py"
+        qlib_data_dir_path=r"/home/yunbo/project/quantitative/qlib_data/cn_data",
+        dump_bin_py_path=r"/home/yunbo/project/quantitative/venv/lib/python3.10/site-packages/qlib/scripts/dump_bin.py"
     ):
         self.save_basic_folder_path = './download_data/basic'
         self.save_adj_folder_path = './download_data/adj'
@@ -23,6 +23,7 @@ class DataToQlib:
         self.save_daily_folder_path = './download_data/daily'
         self.save_index_path = './download_data/origin_download_index'
         self.save_index_daily_folder_path = './download_data/index_daily'
+        self.save_shenwan_daily_path = './download_data/shenwan_daily'
 
         self.qlib_index_instrument_path=f'{qlib_data_dir_path}/instruments'
 
@@ -36,7 +37,7 @@ class DataToQlib:
             "000852.SH": "csi1000",  # 中证1000
             "000905.SH": "csi500",  # 中证500
             "000906.SH": "csi800",  # 中证800
-            "000985.SH": "all",  # 中证全指
+            "000985.SH": "csiall",  # 中证全指
             "399006.SZ": "csigg",  # 创业板指
         }
 
@@ -54,19 +55,20 @@ class DataToQlib:
     # -----------2222 方法二，单线程------------
     # 单线程版本，易理解
     def start_to_qlib_single_thread(self):
-        self.process(self.save_index_daily_folder_path, ['ts_code', 'trade_date'], 'day', '1、指数日线行情')#放前面，不然会覆盖
-        # self.process(self.save_balancesheet_folder_path ,['ts_code', 'ann_date'],'6mon','2、负债')
-        # self.process(self.save_income_folder_path,['ts_code', 'ann_date'],'6mon','3、利润')  # ← 已完成
-        # self.process(self.save_fina_indicator_folder_path, ['ts_code', 'ann_date'],'6mon','4、财务')
-        # self.process(self.save_basic_folder_path, ['ts_code', 'trade_date'], 'day','5、基础行情')  # ← 已转换,注释掉避免重复
-        # self.process(self.save_adj_folder_path, ['ts_code', 'trade_date'], 'day','6、复权因子')  # ← 已转换,注释掉避免重复
-        # self.process(self.save_daily_folder_path, ['ts_code', 'trade_date'], 'day', '7、日线行情')  # ← 已转换,注释掉避免重复
-        # self.process(self.save_basic_30min_folder_path, ['ts_code', 'time'], '30min','5、30分钟级别数据')
+        # self.process(self.save_balancesheet_folder_path ,['ts_code', 'ann_date'],'6mon','dump_all','2、负债')
+        # self.process(self.save_income_folder_path,['ts_code', 'ann_date'],'6mon','dump_all','3、利润')  # ← 已完成
+        # self.process(self.save_fina_indicator_folder_path, ['ts_code', 'ann_date'],'6mon','dump_all','4、财务')
+        # self.process(self.save_basic_folder_path, ['ts_code', 'trade_date'], 'day','dump_all','5、基础行情')  # ← 已转换,注释掉避免重复
+        self.process(self.save_adj_folder_path, ['ts_code', 'trade_date'], 'day','dump_all','6、复权因子')  # ← 已转换,注释掉避免重复
+        # self.process(self.save_daily_folder_path, ['ts_code', 'trade_date'], 'day','dump_all', '7、日线行情')  # ← 已转换,注释掉避免重复
+        self.process(self.save_shenwan_daily_path, ['ts_code', 'trade_date'], 'day', 'dump_fix','8、申万指数日线行情')
+        self.process(self.save_index_daily_folder_path, ['ts_code', 'trade_date'], 'day','dump_fix', '1、指数日线行情')
+        # self.process(self.save_basic_30min_folder_path, ['ts_code', 'time'], '30min','dump_all','5、30分钟级别数据')
 
 
         print("全部 process 执行完毕")
 
-    def process(self, csv_folder_path, required_columns, frequency, desc_str="qlib 转换"):
+    def process(self, csv_folder_path, required_columns, frequency,dump_fun="dump_all", desc_str="qlib 转换"):
         # 使用pathlib处理路径
         folder_path = Path(csv_folder_path)
         if not folder_path.exists():
@@ -115,7 +117,7 @@ class DataToQlib:
             cmd = [
                 sys.executable,
                 str(dump_bin_py_path.absolute()),
-                "dump_all",  # 使用dump_all处理整个目录
+                f"{dump_fun}",  # 使用dump_all处理整个目录
                 "--data_path", str(folder_path.absolute()),  # 传入目录路径
                 "--qlib_dir", str(qlib_data_dir_path.absolute()),
                 "--freq", frequency,
@@ -192,7 +194,7 @@ class DataToQlib:
 
             # 4. 生成start_date/end_date + 格式化股票代码
             total_end = result_df['trade_date'].max() #选择0
-            # total_end = datetime.now()  # 选择1：最后一个end_date设为今天
+            total_end = datetime.now()  # 选择1：最后一个end_date设为今天
             final_result = []
             for i in range(len(change_dates)):
                 start_date = change_dates.iloc[i].strftime('%Y-%m-%d')
