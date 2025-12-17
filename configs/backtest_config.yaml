@@ -20,7 +20,12 @@ backtest:
 
   # ========== 权重配置 ==========
   weighting:
-    method: "equal"          # 权重方法: equal (等权) / factor_weighted (因子加权) / market_cap (市值加权)
+    method: "max_sharpe"     # 权重方法: equal (等权) / min_vol (最小方差) / max_sharpe (最大夏普) / factor_weighted (因子加权)
+    lookback_days: 252       # 回看天数（用于min_vol/max_sharpe计算协方差）
+    max_weight: 0.05         # 单只股票最大权重（min_vol/max_sharpe有效）
+    min_weight: 0.0          # 单只股票最小权重
+    risk_free_rate: 0.02     # 无风险利率（max_sharpe有效，当use_dynamic_rf=false时使用）
+    use_dynamic_rf: true     # 是否使用动态SHIBOR作为无风险利率（避免未来函数）
 
   # ========== 调仓频率 ==========
   rebalance:

@@ -21,6 +21,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.logger import get_logger
 from utils.data_loader import DataLoader
+from backtest.weight_optimizer import WeightOptimizer, RiskParityOptimizer
 
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']  # 用黑体显示中文
@@ -399,8 +400,25 @@ class Backtester:
         self.save_dir = config.get('output', {}).get('save_dir', 'backtest/results')
         os.makedirs(self.save_dir, exist_ok=True)
 
+        # 权重优化器配置
+        weighting_config = config.get('weighting', {})
+        self.use_dynamic_rf = weighting_config.get('use_dynamic_rf', False)
+        self.weight_optimizer = WeightOptimizer(
+            method=weighting_config.get('method', 'equal'),
+            lookback_days=weighting_config.get('lookback_days', 252),
+            max_weight=weighting_config.get('max_weight', 0.05),
+            min_weight=weighting_config.get('min_weight', 0.0),
+            risk_free_rate=weighting_config.get('risk_free_rate', 0.02),
+            use_dynamic_rf=self.use_dynamic_rf
+        )
+
+        # 价格数据缓存（用于权重优化）
+        self.price_df_cache = None
+
         self.logger.info("Backtester初始化完成")
         self.logger.info(f"交易时机: {'开盘价' if self.trade_at_open else '收盘价'}")
+        self.logger.info(f"权重方法: {self.weighting_method}")
+        self.logger.info(f"动态无风险利率(SHIBOR): {self.use_dynamic_rf}")
 
     def run(self, factor_name: str, factor_data: pd.DataFrame = None) -> Dict:
         """
@@ -454,6 +472,37 @@ class Backtester:
             end_date
         )
 
+        # 4.1 加载历史价格数据（用于min_vol/max_sharpe权重优化）
+        if self.weighting_method in ['min_vol', 'max_sharpe']:
+            self.logger.info("加载历史价格数据用于权重优化...")
+            # 获取所有可能涉及的股票
+            all_stocks = factor_data.index.unique().tolist()
+            # 计算需要的历史数据起始日期（lookback_days + buffer）
+            lookback_start = pd.Timestamp(start_date) - pd.Timedelta(days=400)
+            price_data = self.data_loader.load_stock_prices(
+                stock_list=all_stocks,
+                start_date=lookback_start.strftime('%Y-%m-%d'),
+                end_date=end_date,
+                fields=['$close']
+            )
+            # 转换为宽表格式：index=日期, columns=股票代码
+            if price_data is not None and len(price_data) > 0:
+                price_pivot = price_data['$close'].unstack(level=0)
+                self.price_df_cache = price_pivot
+                self.logger.info(f"价格数据: {len(price_pivot)}天, {len(price_pivot.columns)}只股票")
+            else:
+                self.logger.warning("无法加载价格数据，将使用等权")
+                self.price_df_cache = None
+
+        # 4.2 加载SHIBOR数据（用于max_sharpe动态无风险利率）
+        if self.weighting_method == 'max_sharpe' and self.use_dynamic_rf:
+            self.logger.info("加载SHIBOR数据用于动态无风险利率...")
+            shibor_df = self._load_shibor_data(start_date, end_date)
+            if shibor_df is not None:
+                self.weight_optimizer.set_shibor_data(shibor_df)
+            else:
+                self.logger.warning("SHIBOR数据加载失败，将使用固定无风险利率")
+
         # 5. 执行回测
         self.logger.info("\n开始模拟交易...")
 
@@ -479,7 +528,10 @@ class Backtester:
                                       rebalance_date)
 
             # 计算目标权重
-            target_weights = self._calculate_weights(selected_stocks, factor_values, factor_name)
+            target_weights = self._calculate_weights(
+                selected_stocks, factor_values, factor_name,
+                current_date=pd.Timestamp(rebalance_date)
+            )
 
             # 调仓
             portfolio.rebalance(target_weights, prices, rebalance_date)
@@ -555,12 +607,60 @@ class Backtester:
             raise ValueError(f"不支持的选股方法: {self.selection_method}")
 
     def _calculate_weights(self, selected_stocks: List[str],
-                          factor_values: pd.DataFrame, factor_name: str) -> Dict[str, float]:
-        """计算权重"""
+                          factor_values: pd.DataFrame, factor_name: str,
+                          current_date: pd.Timestamp = None) -> Dict[str, float]:
+        """
+        计算权重
+
+        Parameters
+        ----------
+        selected_stocks : List[str]
+            选中的股票列表
+        factor_values : pd.DataFrame
+            因子值
+        factor_name : str
+            因子名称
+        current_date : pd.Timestamp, optional
+            当前调仓日期（用于min_vol/max_sharpe等优化方法）
+
+        Returns
+        -------
+        Dict[str, float]
+            权重字典
+        """
+        if len(selected_stocks) == 0:
+            return {}
+
         if self.weighting_method == 'equal':
             # 等权
             weight = 1.0 / len(selected_stocks)
             return {stock: weight for stock in selected_stocks}
+
+        elif self.weighting_method in ['min_vol', 'max_sharpe']:
+            # 使用权重优化器
+            if self.price_df_cache is None or current_date is None:
+                # 没有价格数据，回退到等权
+                self.logger.warning("价格数据不可用，使用等权")
+                weight = 1.0 / len(selected_stocks)
+                return {stock: weight for stock in selected_stocks}
+
+            return self.weight_optimizer.optimize(
+                self.price_df_cache,
+                selected_stocks,
+                current_date
+            )
+
+        elif self.weighting_method == 'factor_weighted':
+            # 因子加权（因子值归一化作为权重）
+            stock_factors = factor_values[factor_values.index.isin(selected_stocks)][factor_name]
+            if self.ascending:
+                # 低波动策略：因子值越小权重越大
+                inv_factors = 1.0 / (stock_factors + 1e-6)
+                weights = inv_factors / inv_factors.sum()
+            else:
+                # 高值策略：因子值越大权重越大
+                weights = stock_factors / stock_factors.sum()
+            return weights.to_dict()
 
         else:
             raise ValueError(f"不支持的权重方法: {self.weighting_method}")
@@ -589,6 +689,52 @@ class Backtester:
                 pass
 
         return prices
+
+    def _load_shibor_data(self, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        加载SHIBOR数据
+
+        Parameters
+        ----------
+        start_date : str
+            开始日期
+        end_date : str
+            结束日期
+
+        Returns
+        -------
+        pd.DataFrame
+            SHIBOR数据，包含 'date' 和 '1y' 列
+        """
+        try:
+            import tushare as ts
+            ts.set_token('a79f284e5d10967dacb6531a3c755a701ca79341ff0c60d59f1fcbf1')
+            pro = ts.pro_api()
+
+            # 转换日期格式
+            start_fmt = start_date.replace('-', '')
+            end_fmt = end_date.replace('-', '')
+
+            # 获取SHIBOR数据
+            df = pro.shibor(start_date=start_fmt, end_date=end_fmt)
+
+            if df is None or len(df) == 0:
+                self.logger.warning("SHIBOR数据为空")
+                return None
+
+            # 转换日期格式
+            df['date'] = pd.to_datetime(df['date'], format='%Y%m%d')
+            df = df.sort_values('date').reset_index(drop=True)
+
+            self.logger.info(f"加载SHIBOR数据: {len(df)}条, "
+                           f"范围: {df['date'].min().strftime('%Y-%m-%d')} ~ "
+                           f"{df['date'].max().strftime('%Y-%m-%d')}")
+
+            return df
+
+        except Exception as e:
+            self.logger.error(f"加载SHIBOR数据失败: {e}")
+            return None
 
     def _print_results(self, metrics: Dict):
         """打印业绩指标"""

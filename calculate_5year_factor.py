@@ -26,7 +26,7 @@ def main():
 
     # 时间范围（5年）
     start_date = '2020-12-11'  # 5年前
-    end_date = '2025-12-11'    # 今天
+    end_date = '2025-12-17'    # 今天
 
     logger.info(f"计算时间范围: {start_date} ~ {end_date}")
     logger.info(f"预计交易日数: ~1255天 (5年 × 251天/年)")

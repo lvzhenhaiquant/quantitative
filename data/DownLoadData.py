@@ -2331,4 +2331,3 @@ class DownloadDataFromTushare_Baostock:
             executor.submit(self._save_substock_data, self.save_dir_shenwan_daily, file_name_shenwan_daily_df, 0)
         print("update_tushare_shenwan_daily 下载完成")
 
-

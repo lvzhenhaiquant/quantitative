@@ -34,8 +34,12 @@ ENV/
 
 # QLib数据目录
 qlib_data/
+qlib_data_zhenhai1/
 data/TushareData/
 data/BaostockData/
+
+# VS Code workspace
+*.code-workspace
 
 # 因子缓存
 factor_production/cache/
