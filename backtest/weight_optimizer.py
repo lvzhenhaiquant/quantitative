@@ -176,7 +176,7 @@ class WeightOptimizer:
                     price_df: pd.DataFrame,
                     selected_stocks: List[str],
                     current_date: pd.Timestamp) -> Dict[str, float]:
-        """最大夏普比率优化"""
+        """最大夏普比率优化（带fallback：先尝试有上限，失败则用最小方差）"""
         hist_prices = self._get_historical_prices(price_df, selected_stocks, current_date)
 
         if len(hist_prices) < 60 or len(hist_prices.columns) < 2:
@@ -191,22 +191,24 @@ class WeightOptimizer:
             # 获取无风险利率（动态SHIBOR或固定值）
             rf = self._get_risk_free_rate(current_date)
 
-            # 最大夏普比率优化
-            ef = EfficientFrontier(mu, S, weight_bounds=(self.min_weight, self.max_weight))
-            ef.max_sharpe(risk_free_rate=rf)
-            weights = ef.clean_weights()
+            # 1. 先尝试带上限的最大夏普
+            try:
+                ef = EfficientFrontier(mu, S, weight_bounds=(self.min_weight, self.max_weight))
+                ef.max_sharpe(risk_free_rate=rf)
+                weights = ef.clean_weights()
 
-            # 转换为字典，只保留权重>0的股票
-            result = {stock: w for stock, w in weights.items() if w > 1e-6}
+                # 转换为字典，只保留权重>0的股票
+                result = {stock: w for stock, w in weights.items() if w > 1e-6}
 
-            # 如果优化后没有股票被选中，回退到等权
-            if len(result) == 0:
+                if len(result) > 0:
+                    return result
+
+            except Exception as e1:
+                # 2. 最大夏普失败，直接用等权
                 return self._equal_weight(selected_stocks)
 
-            return result
-
         except Exception as e:
-            print(f"  最大夏普优化失败: {e}, 使用等权")
+            print(f"  优化失败: {e}, 使用等权")
             return self._equal_weight(selected_stocks)
 
 

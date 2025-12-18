@@ -388,6 +388,7 @@ class Backtester:
 
         # 提取配置
         self.initial_cash = config.get('initial_cash', 10000000)
+        self.backtest_start_date = config.get('backtest_start_date', None)  # 回测起始日期
         self.selection_method = config.get('selection', {}).get('method', 'top_n')
         self.n_stocks = config.get('selection', {}).get('n_stocks', 50)
         self.ascending = config.get('selection', {}).get('ascending', True)
@@ -395,6 +396,13 @@ class Backtester:
         self.rebalance_freq = config.get('rebalance', {}).get('freq', 'weekly')
         self.benchmark_code = config.get('benchmark', {}).get('code', 'sh000852')  # 默认中证1000
         self.trade_at_open = config.get('execution', {}).get('trade_at_open', True)  # 默认开盘价交易
+
+        # 股票池配置（用于避免未来函数）
+        self.universe = config.get('universe', {}).get('name', 'csi1000')
+        self.filter_by_universe = config.get('universe', {}).get('filter', True)  # 是否按成分股筛选
+
+        # 成分股缓存（避免重复加载）
+        self._universe_cache = None
 
         # 创建结果保存目录
         self.save_dir = config.get('output', {}).get('save_dir', 'backtest/results')
@@ -419,6 +427,7 @@ class Backtester:
         self.logger.info(f"交易时机: {'开盘价' if self.trade_at_open else '收盘价'}")
         self.logger.info(f"权重方法: {self.weighting_method}")
         self.logger.info(f"动态无风险利率(SHIBOR): {self.use_dynamic_rf}")
+        self.logger.info(f"股票池: {self.universe} (按日筛选: {self.filter_by_universe})")
 
     def run(self, factor_name: str, factor_data: pd.DataFrame = None) -> Dict:
         """
@@ -451,6 +460,11 @@ class Backtester:
         if factor_data is None or len(factor_data) == 0:
             self.logger.error("因子数据加载失败!")
             return None
+
+        # 1.1 根据配置过滤回测起始日期
+        if self.backtest_start_date:
+            factor_data = factor_data[factor_data['date'] >= self.backtest_start_date]
+            self.logger.info(f"回测起始日期: {self.backtest_start_date}")
 
         self.logger.info(f"因子数据: {len(factor_data)}条记录, "
                        f"{factor_data['date'].nunique()}个交易日")
@@ -516,11 +530,11 @@ class Backtester:
                 self.logger.warning(f"  跳过: 无因子数据")
                 continue
 
-            # 选股
-            selected_stocks = self._select_stocks(factor_values, factor_name)
+            # 选股（传入日期用于筛选当日成分股，避免未来函数）
+            selected_stocks = self._select_stocks(factor_values, factor_name, date=rebalance_date)
 
             if len(selected_stocks) == 0:
-                self.logger.warning(f"  跳过: 选股为空")
+                self.logger.warning(f"  跳过: 选股为空（可能当日成分股不足）")
                 continue
 
             # 加载当日价格
@@ -596,10 +610,72 @@ class Backtester:
         else:
             raise ValueError(f"不支持的调仓频率: {self.rebalance_freq}")
 
-    def _select_stocks(self, factor_values: pd.DataFrame, factor_name: str) -> List[str]:
-        """选股"""
+    def _get_universe_stocks(self, date: str) -> List[str]:
+        """
+        获取指定日期的股票池成分股（避免未来函数）
+
+        Parameters
+        ----------
+        date : str
+            日期
+
+        Returns
+        -------
+        List[str]
+            当日有效的成分股列表
+        """
+        if not self.filter_by_universe:
+            return None  # 不筛选，返回 None
+
+        # 使用缓存避免重复加载 instruments 文件
+        if self._universe_cache is None:
+            try:
+                self._universe_cache = self.data_loader.load_instruments(self.universe)
+            except Exception as e:
+                self.logger.warning(f"加载股票池 {self.universe} 失败: {e}，将不按成分股筛选")
+                self.filter_by_universe = False
+                return None
+
+        # 筛选在 date 有效的股票
+        target_date = pd.to_datetime(date)
+        valid_stocks = self._universe_cache[
+            (pd.to_datetime(self._universe_cache['start_date']) <= target_date) &
+            (pd.to_datetime(self._universe_cache['end_date']) >= target_date)
+        ]
+
+        return valid_stocks['code'].tolist()
+
+    def _select_stocks(self, factor_values: pd.DataFrame, factor_name: str,
+                       date: str = None) -> List[str]:
+        """
+        选股（先筛选当日成分股，再按因子排序）
+
+        Parameters
+        ----------
+        factor_values : pd.DataFrame
+            因子数据
+        factor_name : str
+            因子名称
+        date : str, optional
+            调仓日期（用于筛选当日成分股）
+
+        Returns
+        -------
+        List[str]
+            选中的股票列表
+        """
+        # 1. 先筛选当日成分股（避免未来函数）
+        if date and self.filter_by_universe:
+            universe_stocks = self._get_universe_stocks(date)
+            if universe_stocks:
+                # 只保留当日是成分股的股票
+                factor_values = factor_values[factor_values.index.isin(universe_stocks)]
+
+        if len(factor_values) == 0:
+            return []
+
+        # 2. 按因子排序选股
         if self.selection_method == 'top_n':
-            # TopN选股
             sorted_stocks = factor_values.sort_values(factor_name, ascending=self.ascending)
             return sorted_stocks.head(self.n_stocks).index.tolist()
 
