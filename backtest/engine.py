@@ -232,6 +232,13 @@ class BacktestEngine:
             'filter': True  # 是否按日期筛选成分股
         }
 
+        # 股票过滤配置（ST、停牌、涨跌停）
+        config['stock_filter'] = {
+            'exclude_st': True,
+            'exclude_suspend': True,
+            'exclude_limit': True,
+        }
+
         return config
 
     def _get_benchmark_name(self, code: str) -> str:

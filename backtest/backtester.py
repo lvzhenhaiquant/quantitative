@@ -404,6 +404,21 @@ class Backtester:
         # 成分股缓存（避免重复加载）
         self._universe_cache = None
 
+        # 股票过滤配置（ST、停牌、涨跌停）
+        filter_config = config.get('stock_filter', {})
+        self.filter_st = filter_config.get('exclude_st', True)
+        self.filter_suspend = filter_config.get('exclude_suspend', True)
+        self.filter_limit = filter_config.get('exclude_limit', True)
+
+        # 初始化过滤器
+        self._stock_filter = None
+        if self.filter_st or self.filter_suspend or self.filter_limit:
+            try:
+                from backtest.filters import StockFilter
+                self._stock_filter = StockFilter()
+            except Exception as e:
+                self.logger.warning(f"股票过滤器初始化失败: {e}，将跳过过滤")
+
         # 创建结果保存目录
         self.save_dir = config.get('output', {}).get('save_dir', 'backtest/results')
         os.makedirs(self.save_dir, exist_ok=True)
@@ -428,6 +443,7 @@ class Backtester:
         self.logger.info(f"权重方法: {self.weighting_method}")
         self.logger.info(f"动态无风险利率(SHIBOR): {self.use_dynamic_rf}")
         self.logger.info(f"股票池: {self.universe} (按日筛选: {self.filter_by_universe})")
+        self.logger.info(f"过滤: ST={self.filter_st}, 停牌={self.filter_suspend}, 涨跌停={self.filter_limit}")
 
     def run(self, factor_name: str, factor_data: pd.DataFrame = None) -> Dict:
         """
@@ -648,7 +664,7 @@ class Backtester:
     def _select_stocks(self, factor_values: pd.DataFrame, factor_name: str,
                        date: str = None) -> List[str]:
         """
-        选股（先筛选当日成分股，再按因子排序）
+        选股（先筛选当日成分股，过滤ST/停牌/涨跌停，再按因子排序）
 
         Parameters
         ----------
@@ -657,7 +673,7 @@ class Backtester:
         factor_name : str
             因子名称
         date : str, optional
-            调仓日期（用于筛选当日成分股）
+            调仓日期（用于筛选当日成分股和过滤）
 
         Returns
         -------
@@ -674,7 +690,22 @@ class Backtester:
         if len(factor_values) == 0:
             return []
 
-        # 2. 按因子排序选股
+        # 2. 过滤ST、停牌、涨跌停股票
+        if date and self._stock_filter is not None:
+            all_stocks = factor_values.index.tolist()
+            filtered_stocks = self._stock_filter.filter_stocks(
+                all_stocks,
+                date,
+                exclude_st=self.filter_st,
+                exclude_suspend=self.filter_suspend,
+                exclude_limit=self.filter_limit
+            )
+            factor_values = factor_values[factor_values.index.isin(filtered_stocks)]
+
+        if len(factor_values) == 0:
+            return []
+
+        # 3. 按因子排序选股
         if self.selection_method == 'top_n':
             sorted_stocks = factor_values.sort_values(factor_name, ascending=self.ascending)
             return sorted_stocks.head(self.n_stocks).index.tolist()
