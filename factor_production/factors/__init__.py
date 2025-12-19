@@ -9,6 +9,8 @@ from .volatility import calc_volatility
 from .idio_vol import calc_idio_vol
 from .downside_vol import calc_downside_vol
 
+from .small_cap import calc_small_cap
+
 __all__ = [
     # 换手率因子
     'calc_turnover_mean',
@@ -19,4 +21,5 @@ __all__ = [
     'calc_volatility',
     'calc_idio_vol',
     'calc_downside_vol',
+    'calc_small_cap',
 ]

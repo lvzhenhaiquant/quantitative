@@ -2,17 +2,19 @@ import datetime
 import pandas as pd
 import DownLoadData
 import ToQlib
-# import DownLoadGithub  # 不需要
+from datetime import timedelta
+import datetime
+import time
+
 
 # 使用说明
 # origin_down_load里面放的是原始下载数据
 # 能够直接转换给qlib的股票，格式为SH000000（除了）
 
 if __name__ == '__main__':
-    start_date_str = '20251128'  # 过去5年：从2019年12月开始
-    end_date_str = '20251215'    # 到2024年12月（今天）
-    # df =pd.read_parquet(r"/home/yunbo/project/quantitative/data/download_data/origin_download_index/index_basic_000016.SH_20150101_20251215.parquet")
-    # a=0
+    start_date_str = '20150101'  # 过去5年：从2019年12月开始
+    end_date_str = '20251217'    # 到2024年12月（今天）
+    
     # 二、从Tushare拉取数据到本地处理
     token = 'a79f284e5d10967dacb6531a3c755a701ca79341ff0c60d59f1fcbf1'
     # 1、初始化
@@ -66,11 +68,6 @@ if __name__ == '__main__':
     # DownLoadData.update_tushare_shenwan_daily(start_date_str, end_date_str)
     # # 10、下载申万分类数据
     # DownLoadData.download_tushare_shenwan_classify()
-    
-
-
-    
-
 
 
     # 四、将数据转为Qlib格式
@@ -79,7 +76,7 @@ if __name__ == '__main__':
     dump_bin_py_path = "/home/yunbo/software/venv/lib/python3.10/site-packages/qlib/scripts/dump_bin.py"  # dump_bin.py脚本路径
     ToQlib = ToQlib.DataToQlib(qlib_data_dir_path=qlib_data_dir_path,dump_bin_py_path=dump_bin_py_path)
     # # # 2 开始转换
-    # ToQlib.start_to_qlib_single_thread()  # 转换指数日线行情
+    ToQlib.start_to_qlib_single_thread()  # 转换指数日线行情
     # # 指数转化
     ToQlib.start_toqlib_index()  # 转换指数成分股到instruments (已完成)
     # # 3 测试校验

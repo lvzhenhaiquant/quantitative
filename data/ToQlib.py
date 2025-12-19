@@ -24,6 +24,8 @@ class DataToQlib:
         self.save_index_path = './download_data/origin_download_index'
         self.save_index_daily_folder_path = './download_data/index_daily'
         self.save_shenwan_daily_path = './download_data/shenwan_daily'
+        self.save_updown_limit_forlder_path = './download_data/updown_limit'
+        self.save_moneyflow_folder_path = './download_data/moneyflow'
 
         self.qlib_index_instrument_path=f'{qlib_data_dir_path}/instruments'
 
@@ -55,14 +57,16 @@ class DataToQlib:
     # -----------2222 方法二，单线程------------
     # 单线程版本，易理解
     def start_to_qlib_single_thread(self):
-        # self.process(self.save_balancesheet_folder_path ,['ts_code', 'ann_date'],'6mon','dump_all','2、负债')
-        # self.process(self.save_income_folder_path,['ts_code', 'ann_date'],'6mon','dump_all','3、利润')  # ← 已完成
-        # self.process(self.save_fina_indicator_folder_path, ['ts_code', 'ann_date'],'6mon','dump_all','4、财务')
-        # self.process(self.save_basic_folder_path, ['ts_code', 'trade_date'], 'day','dump_all','5、基础行情')  # ← 已转换,注释掉避免重复
+        self.process(self.save_balancesheet_folder_path ,['ts_code', 'ann_date'],'6mon','dump_all','2、负债')
+        self.process(self.save_income_folder_path,['ts_code', 'ann_date'],'6mon','dump_all','3、利润')  # ← 已完成
+        self.process(self.save_fina_indicator_folder_path, ['ts_code', 'ann_date'],'6mon','dump_all','4、财务')
+        self.process(self.save_basic_folder_path, ['ts_code', 'trade_date'], 'day','dump_all','5、基础行情')  # ← 已转换,注释掉避免重复
         self.process(self.save_adj_folder_path, ['ts_code', 'trade_date'], 'day','dump_all','6、复权因子')  # ← 已转换,注释掉避免重复
-        # self.process(self.save_daily_folder_path, ['ts_code', 'trade_date'], 'day','dump_all', '7、日线行情')  # ← 已转换,注释掉避免重复
-        self.process(self.save_shenwan_daily_path, ['ts_code', 'trade_date'], 'day', 'dump_fix','8、申万指数日线行情')
-        self.process(self.save_index_daily_folder_path, ['ts_code', 'trade_date'], 'day','dump_fix', '1、指数日线行情')
+        self.process(self.save_daily_folder_path, ['ts_code', 'trade_date'], 'day','dump_all', '7、日线行情')  # ← 已转换,注释掉避免重复
+        self.process(self.save_updown_limit_forlder_path, ['ts_code', 'trade_date'], 'day','dump_all', '8、涨跌停转换')  # ← 已转换,注释掉避免重复
+        self.process(self.save_moneyflow_folder_path, ['ts_code', 'trade_date'], 'day','dump_all', '9、 资金流转换')  # ← 已转换,注释掉避免重复
+        self.process(self.save_shenwan_daily_path, ['ts_code', 'trade_date'], 'day', 'dump_fix','10、申万指数日线行情')
+        self.process(self.save_index_daily_folder_path, ['ts_code', 'trade_date'], 'day','dump_fix', '11、指数日线行情')
         # self.process(self.save_basic_30min_folder_path, ['ts_code', 'time'], '30min','dump_all','5、30分钟级别数据')
 
 

@@ -38,6 +38,8 @@ class DownloadDataFromTushare_Baostock:
         self.save_dir_shenwan_daily = './download_data/shenwan_daily'
         self.save_dir_download_index = './download_data/origin_download_index'
         self.save_dir_index_daily = './download_data/index_daily'
+        self.save_dir_updown_limit = './download_data/updown_limit'
+        self.save_dir_moneyflow = './download_data/moneyflow'
 
         self.index_mapping = {
             "上证50": "000016.SH",
@@ -747,19 +749,23 @@ class DownloadDataFromTushare_Baostock:
         file_name_adj = os.path.join(self.save_dir_download,f'download_A_adj_df_{start_date_str}_{end_date_str}.parquet')
         file_name_basic = os.path.join(self.save_dir_download,f'download_A_basic_df_{start_date_str}_{end_date_str}.parquet')
         file_name_daily = os.path.join(self.save_dir_download,f'download_A_daily_df_{start_date_str}_{end_date_str}.parquet')
+        file_name_updown_limit =os.path.join(self.save_dir_download,f'download_A_updown_limit_df_{start_date_str}_{end_date_str}.parquet')
+        file_name_moneyflow =os.path.join(self.save_dir_download,f'download_A_moneyflow_df_{start_date_str}_{end_date_str}.parquet')
         adjust_file_name = os.path.join(self.save_dir_download,f'all_returns_A_adjusted_{start_date_str}_{end_date_str}.parquet')
         adjust_file_name_df = pd.DataFrame()
 
         adj_exists = os.path.exists(file_name_adj)
         basic_exists = os.path.exists(file_name_basic)
         daily_exists = os.path.exists(file_name_daily)
+        updown_limit_exists = os.path.exists(file_name_updown_limit)
+        moneyflow_exists = os.path.exists(file_name_moneyflow)
         adjusted_exists = os.path.exists(adjust_file_name)
-        if adj_exists and basic_exists and daily_exists and adjusted_exists:
-            print("[download_tushare_basic]以下四个文件均已存在，无需重复处理，程序退出!")
+        if adj_exists and basic_exists and daily_exists and adjusted_exists and updown_limit_exists and moneyflow_exists:
+            print("[download_tushare_basic]以下6个文件均已存在，无需重复处理，程序退出!")
             return
 
         adjust_file_name_prefix = 'all_returns_A_adjusted_'
-        adjust_file_name_exist, temp1 = self._utils_read_matched_csv_by_prefix(adjust_file_name_prefix)
+        adjust_file_name_exist, temp1 = self._utils_read_matched_csv_by_prefix(self.save_dir_download, adjust_file_name_prefix)
         temp1 = pd.DataFrame()
         if adjust_file_name_exist:
             print(f"{adjust_file_name_exist}文件已存在，请使用增量下载")
@@ -803,16 +809,38 @@ class DownloadDataFromTushare_Baostock:
                 daily_df = self._get_daily(all_stocks, obtain_date_str, end_date_str)
                 daily_df.to_parquet(file_name_daily, index=False, engine='pyarrow')
             return daily_df
+        
+        def get_updown_limit_df():
+            #  获取涨跌停数据
+            if os.path.exists(file_name_updown_limit):
+                updown_limit_df = pd.read_parquet(file_name_updown_limit, engine='pyarrow')
+            else:
+                updown_limit_df = self._get_updown_limit(all_stocks, obtain_date_str, end_date_str)
+                updown_limit_df.to_parquet(file_name_updown_limit, index=False, engine='pyarrow')
+            return updown_limit_df
+        
+        def get_moneyflow_df():
+            #  获取资金流向数据
+            if os.path.exists(file_name_moneyflow):
+                moneyflow_df = pd.read_parquet(file_name_moneyflow, engine='pyarrow')
+            else:
+                moneyflow_df = self._get_moneyflow(all_stocks, obtain_date_str, end_date_str)
+                moneyflow_df.to_parquet(file_name_moneyflow, index=False, engine='pyarrow')
+            return moneyflow_df
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             # 提交任务
             basic_df_result = executor.submit(get_basic_df)
             adj_df_result = executor.submit(get_adj_df)
             daily_df_result = executor.submit(get_daily_df)
+            updown_limit_df_result = executor.submit(get_updown_limit_df)
+            moneyflow_df_result = executor.submit(get_moneyflow_df)
             # 获取结果
             basic_df = basic_df_result.result()
             adj_df = adj_df_result.result()
             daily_df = daily_df_result.result()
+            updown_limit_df = updown_limit_df_result.result()
+            moneyflow_df = moneyflow_df_result.result()
 
         if len(basic_df) == 0:
             print("远程日线数据为空，退出!")
@@ -822,6 +850,12 @@ class DownloadDataFromTushare_Baostock:
             return
         if len(daily_df) == 0:
             print("远程日线行情数据为空，退出!")
+            return
+        if len(updown_limit_df) == 0:
+            print("远程涨跌停数据为空，退出!")
+            return
+        if len(moneyflow_df) == 0:
+            print("远程资金流向数据为空，退出!")
             return
 
         #  5 复权处理+合并数据
@@ -839,17 +873,21 @@ class DownloadDataFromTushare_Baostock:
         adjust_file_name_df['ts_code'] = adjust_file_name_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
         adj_df['ts_code'] = adj_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
         daily_df['ts_code'] = daily_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
-        adjust_file_name_df.to_parquet(adjust_file_name, index=False, engine='pyarrow')
+        updown_limit_df['ts_code'] = updown_limit_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
+        moneyflow_df['ts_code'] = moneyflow_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
+        # adjust_file_name_df.to_parquet(adjust_file_name, index=False, engine='pyarrow')
         print(f"调整后的数据已保存至{adjust_file_name}，共{len(adjust_file_name_df)}条记录")
 
         daily_df.rename(columns={'vol': 'volume'}, inplace=True)
         adj_df.rename(columns={'adj_factor': 'factor'}, inplace=True)
         # 8 单独保存至单股文件夹
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             executor.submit(self._save_substock_data,self.save_dir_basic,basic_df,0)
             executor.submit(self._save_substock_data,self.save_dir_daily, daily_df,1)
             if not self.add_adj_comlums_flag:
                 executor.submit(self._save_substock_data,self.save_dir_adj, adj_df,2)
+            executor.submit(self._save_substock_data,self.save_dir_updown_limit, updown_limit_df,3)
+            executor.submit(self._save_substock_data,self.save_dir_moneyflow, moneyflow_df,4)
 
 
     def download_tushare_A_finance(self, start_date_str, end_date_str):
@@ -1459,7 +1497,7 @@ class DownloadDataFromTushare_Baostock:
                     leave=True,  # 任务完成后保留进度条
                     dynamic_ncols=True, mininterval=0.1)
         # 3. 多线程保存（合并单股逻辑）
-        with ThreadPoolExecutor(max_workers=16) as inner_executor:
+        with ThreadPoolExecutor(max_workers=64) as inner_executor:
             futures = []
             for stock_code, group_data in grouped:
                 def task(sc=stock_code, gd=group_data):  # 绑定变量，避免闭包延迟
@@ -1652,6 +1690,8 @@ class DownloadDataFromTushare_Baostock:
         file_name_basic_df_prefix = 'download_A_basic_df_'
         file_name_adj_df_prefix = 'download_A_adj_df_'
         file_name_daily_df_prefix = 'download_A_daily_df_'
+        file_name_updown_limit_df_prefix = 'download_A_updown_limit_df_'
+        file_name_moneyflow_df_prefix = 'download_A_moneyflow_df_'
         file_name_adjusted_df_prefix = 'all_returns_A_adjusted_'
 
         file_name_basic, file_name_basic_df = self._utils_read_matched_csv_by_prefix(self.save_dir_download,file_name_basic_df_prefix)
@@ -1666,10 +1706,19 @@ class DownloadDataFromTushare_Baostock:
         if len(file_name_daily_df) == 0:
             print(f"未读取到文件：{file_name_daily_df_prefix},请先下载原始数据")
             return
+        file_name_updown,file_name_updown_limit_df = self._utils_read_matched_csv_by_prefix(self.save_dir_download,file_name_updown_limit_df_prefix)
+        if len(file_name_updown_limit_df) == 0:
+            print(f"未读取到文件：{file_name_updown_limit_df_prefix},请先下载原始数据")
+            return
+        file_name_moneyflow, file_name_moneyflow_df = self._utils_read_matched_csv_by_prefix(self.save_dir_download,file_name_moneyflow_df_prefix)
+        if len(file_name_moneyflow_df) == 0:
+            print(f"未读取到文件：{file_name_moneyflow_df_prefix},请先下载原始数据")
+            return
         file_name_adjusted, file_name_adjusted_df = self._utils_read_matched_csv_by_prefix(self.save_dir_download,file_name_adjusted_df_prefix)
         if len(file_name_adjusted_df) == 0:
             print(f"未读取到文件：{file_name_adjusted_df_prefix},请先下载原始数据")
             return
+        
 
         file_name_adjusted_df = pd.DataFrame()  # 此文件为basic_df和adj_df 合并而来，设置为空防止占内存，后期赋值保存
         old_start_str, old_end_str = self._utils_extract_date_from_filename(file_name_adjusted)
@@ -1697,72 +1746,99 @@ class DownloadDataFromTushare_Baostock:
         # 1、从未出现过的股票，日期最小取到最大
         if len(new_stock_list) > 0:
             print("-----获取新股票所有日期数据-----：")
-            with ThreadPoolExecutor(max_workers=3) as executor:
+            with ThreadPoolExecutor(max_workers=5) as executor:
                 new_basic_df = executor.submit(self._get_daily_basic, new_stock_list, obtain_begin_all_str, end_all_str)
                 new_adj_df = executor.submit(self._get_adj_factor, new_stock_list, obtain_begin_all_str, end_all_str)
                 new_daily_df = executor.submit(self._get_daily, new_stock_list, obtain_begin_all_str, end_all_str)
+                new_updown_limit_df = executor.submit(self._get_updown_limit, new_stock_list, obtain_begin_all_str, end_all_str)
+                new_moneyflow_df = executor.submit(self._get_moneyflow, new_stock_list, obtain_begin_all_str, end_all_str)
                 new_basic_df = new_basic_df.result()
                 new_adj_df = new_adj_df.result()
                 new_daily_df = new_daily_df.result()
+                new_updown_limit_df = new_updown_limit_df.result()
+                new_moneyflow_df = new_moneyflow_df.result()
 
             # 1.1获取基础日线行情
-            # new_basic_df = self._get_daily_basic(new_stock_list, obtain_begin_all_str, end_all_str)
             if len(new_basic_df) == 0:
                 print("new_basic_df 获取数据为空")
             file_name_basic_df = pd.concat([file_name_basic_df, new_basic_df], ignore_index=True, axis=0)  # 纵向追加（行级追加）
             # 1.2 获取复权因子
-            # new_adj_df = self._get_adj_factor(new_stock_list, obtain_begin_all_str, end_all_str)
             if len(new_adj_df) == 0:
                 print("new_adj_df 获取数据为空")
             file_name_adj_df = pd.concat([file_name_adj_df, new_adj_df], ignore_index=True, axis=0)  # 纵向追加（行级追加）
             # 1.2 获取日线行情
-            # new_daily_df = self._get_daily(new_stock_list, obtain_begin_all_str, end_all_str)
             if len(new_daily_df) == 0:
                 print("new_daily_df 获取数据为空")
             file_name_daily_df = pd.concat([file_name_daily_df, new_daily_df], ignore_index=True, axis=0)  # 纵向追加（行级追加）
+            # 1.3 获取涨跌停数据
+            if len(new_updown_limit_df) == 0:
+                print("new_updown_limit_df 获取数据为空")
+            file_name_updown_limit_df = pd.concat([file_name_updown_limit_df, new_updown_limit_df], ignore_index=True, axis=0)  # 纵向追加（行级追加）
+            # 1.4 获取资金流向数据
+            if len(new_moneyflow_df) == 0:
+                print("new_moneyflow_df 获取数据为空")
+            file_name_moneyflow_df = pd.concat([file_name_moneyflow_df, new_moneyflow_df], ignore_index=True, axis=0)  # 纵向追加（行级追加）
 
         # 2、对于老股票，补充缺失的时间段数据
         print("-----获取旧股票新日期数据-----：")
         for missing_start_str, missing_end_str in missing_start_end_list:
             obtain_missing_date_str = (pd.to_datetime(missing_start_str, format='%Y%m%d') - pd.DateOffset(months=self.more_month)).strftime('%Y%m%d')  # '20220901'
-            with ThreadPoolExecutor(max_workers=3) as executor:
+            with ThreadPoolExecutor(max_workers=5) as executor:
                 basic_df = executor.submit(self._get_daily_basic, old_stock_list, obtain_missing_date_str,missing_end_str)
                 adj_df = executor.submit(self._get_adj_factor, old_stock_list, obtain_missing_date_str, missing_end_str)
                 daily_df = executor.submit(self._get_daily, old_stock_list, obtain_missing_date_str, missing_end_str)
+                updown_limit_df = executor.submit(self._get_updown_limit, old_stock_list, obtain_missing_date_str, missing_end_str)
+                moneyflow_df = executor.submit(self._get_moneyflow, old_stock_list, obtain_missing_date_str, missing_end_str)
                 basic_df = basic_df.result()
                 adj_df = adj_df.result()
                 daily_df = daily_df.result()
+                updown_limit_df = updown_limit_df.result()
+                moneyflow_df = moneyflow_df.result()
             # 2.1获取基础日线行情
-            # basic_df = self._get_daily_basic(old_stock_list, obtain_missing_date_str, missing_end_str)
             file_name_basic_df = pd.concat(
                 [file_name_basic_df, basic_df],  # 先加原始数据，后加新数据
                 ignore_index=True,  # 重置索引（重要，避免索引冲突）
                 axis=0)  # 纵向追加（行级追加）
             # 2.2 获取复权因子
-            # adj_df =self._get_adj_factor(old_stock_list, missing_start_str, missing_end_str)
             file_name_adj_df = pd.concat(
                 [file_name_adj_df, adj_df],  # 先加原始数据，后加新数据
                 ignore_index=True,  # 重置索引（重要，避免索引冲突）
                 axis=0)  # 纵向追加（行级追加）
             # 2.3 获取日线行情
-            daily_df = self._get_daily(old_stock_list, missing_start_str, missing_end_str)
             file_name_daily_df = pd.concat(
                 [file_name_daily_df, daily_df],  # 先加原始数据，后加新数据
                 ignore_index=True,  # 重置索引（重要，避免索引冲突）
+                axis=0)  # 纵向追加（行级追加）
+            # 2.4 获取涨跌停数据
+            file_name_updown_limit_df = pd.concat(
+                [file_name_updown_limit_df, updown_limit_df],  # 先加原始数据，后加新数据
+                ignore_index=True,  # 重置索引（重要，避免索引冲突）
+                axis=0)  # 纵向追加（行级追加）
+            # 2.5 获取资金流向数据
+            file_name_moneyflow_df = pd.concat(
+                [file_name_moneyflow_df, moneyflow_df],  # 先加原始数据，后加新数据
+                ignore_index=True,  # 重置索引（重要，避免索引冲突
                 axis=0)  # 纵向追加（行级追加）
 
         # 3 排序并去重
         file_name_basic_df = file_name_basic_df.sort_values(by=['ts_code', 'trade_date']).drop_duplicates(keep="first",ignore_index=True)  # 保留第一次出现的重复行（可改为"last"保留最后一次）# 去重后重置索引
         file_name_adj_df = file_name_adj_df.sort_values(by=['ts_code', 'trade_date']).drop_duplicates(keep="first",ignore_index=True)  # 保留第一次出现的重复行（可改为"last"保留最后一次）# 去重后重置索引
         file_name_daily_df = file_name_daily_df.sort_values(by=['ts_code', 'trade_date']).drop_duplicates(keep="first",ignore_index=True)
+        file_name_updown_limit_df = file_name_updown_limit_df.sort_values(by=['ts_code', 'trade_date']).drop_duplicates(keep="first",ignore_index=True)
+        file_name_moneyflow_df = file_name_moneyflow_df.sort_values(by=['ts_code', 'trade_date']).drop_duplicates(keep="first",ignore_index=True)
         # 4 保存并删除
         self._to_new_csv_and_delete_old(file_name_basic, file_name_basic_df, begin_all_str, end_all_str,self.save_dir_download)
         self._to_new_csv_and_delete_old(file_name_adj, file_name_adj_df, begin_all_str, end_all_str,self.save_dir_download)
         self._to_new_csv_and_delete_old(file_name_daily, file_name_daily_df, begin_all_str, end_all_str,self.save_dir_download)
+        self._to_new_csv_and_delete_old(file_name_updown, file_name_updown_limit_df, begin_all_str, end_all_str,self.save_dir_download)
+        self._to_new_csv_and_delete_old(file_name_moneyflow, file_name_moneyflow_df, begin_all_str, end_all_str,self.save_dir_download)
 
         file_name_basic_df['ts_code'] = file_name_basic_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
         file_name_adj_df['ts_code'] = file_name_adj_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
         file_name_daily_df['ts_code'] = file_name_daily_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
+        file_name_updown_limit_df['ts_code'] = file_name_updown_limit_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
+        file_name_moneyflow_df['ts_code'] = file_name_moneyflow_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
+
 
         file_name_adjusted_df = file_name_basic_df
         #  5 复权处理+合并数据
@@ -1783,11 +1859,13 @@ class DownloadDataFromTushare_Baostock:
         file_name_adj_df.rename(columns={'adj_factor': 'factor'}, inplace=True)
 
         # # 8 单独保存至单股文件夹
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             executor.submit(self._save_substock_data,self.save_dir_basic,file_name_basic_df,0)
             executor.submit(self._save_substock_data,self.save_dir_daily, file_name_daily_df,1)
             if not self.add_adj_comlums_flag:
                 executor.submit(self._save_substock_data,self.save_dir_adj, file_name_adj_df,2)
+            executor.submit(self._save_substock_data,self.save_dir_updown_limit, file_name_updown_limit_df,3)
+            executor.submit(self._save_substock_data,self.save_dir_moneyflow, file_name_moneyflow_df,4)
 
 
     def updates_tushare_A_finance(self, start_date_str, end_date_str):
@@ -2331,3 +2409,46 @@ class DownloadDataFromTushare_Baostock:
             executor.submit(self._save_substock_data, self.save_dir_shenwan_daily, file_name_shenwan_daily_df, 0)
         print("update_tushare_shenwan_daily 下载完成")
 
+    def _get_updown_limit(self, stock_list, start_date_str, end_date_str):
+        updown_limit_all = []
+        updown_limit_df = pd.DataFrame()
+        for i, stock_code in enumerate(tqdm(stock_list, desc='获取涨跌停数据'), 1):
+            try:
+                tmp = self.pro.stk_limit(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
+                if not tmp.empty:
+                    updown_limit_all.append(tmp)
+                else:
+                    print(f"_get_updown_limit 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
+            except Exception as e:
+                print(f"获取涨跌停数据失败（{stock_code}）：{e}")
+                continue
+        if updown_limit_all:  # 合并复权因子（过滤无效数据）
+            updown_limit_all = [df for df in updown_limit_all if not df.empty]
+            updown_limit_df = pd.concat(updown_limit_all, ignore_index=True)
+            updown_limit_df =  updown_limit_df[["ts_code", "trade_date", "up_limit", "down_limit"]]
+            updown_limit_df = updown_limit_df.dropna(subset=['ts_code', 'trade_date'])  # 过滤NaN
+            updown_limit_df['trade_date'] = pd.to_datetime(updown_limit_df['trade_date']).dt.strftime('%Y-%m-%d')
+            print(f"共获取{len(updown_limit_df)}条涨跌停数据")
+        return updown_limit_df
+    
+    
+    def _get_moneyflow(self, stock_list, start_date_str, end_date_str):
+        moneyflow_all = []
+        moneyflow_df = pd.DataFrame()
+        for i, stock_code in enumerate(tqdm(stock_list, desc='获取个股资金流向数据'), 1):
+            try:
+                tmp = self.pro.moneyflow(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
+                if not tmp.empty:
+                    moneyflow_all.append(tmp)
+                else:
+                    print(f"_get_moneyflow 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
+            except Exception as e:
+                print(f"获取个股资金流向失败（{stock_code}）：{e}")
+                continue
+        if moneyflow_all:  # 合并复权因子（过滤无效数据）
+            moneyflow_all = [df for df in moneyflow_all if not df.empty]
+            moneyflow_df = pd.concat(moneyflow_all, ignore_index=True)
+            moneyflow_df = moneyflow_df.dropna(subset=['ts_code', 'trade_date'])  # 过滤NaN
+            moneyflow_df['trade_date'] = pd.to_datetime(moneyflow_df['trade_date']).dt.strftime('%Y-%m-%d')
+            print(f"共获取{len(moneyflow_df)}条个股资金流向数据")
+        return moneyflow_df
