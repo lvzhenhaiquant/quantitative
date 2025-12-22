@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 import numpy as np
+import requests
 import tushare as ts
 import pandas as pd
 from jedi.api import file_name
@@ -18,6 +19,7 @@ import baostock as bs
 from typing import List
 
 from tushare import new_stocks
+from urllib3.exceptions import NameResolutionError, MaxRetryError, ConnectionError
 
 
 # 获取中证1000基本面数据
@@ -56,6 +58,8 @@ class DownloadDataFromTushare_Baostock:
         self.add_comlums_shenewn_flag = False  # 是否在下载数据中增加万申L1,L2,L3列，容易造成数据冗余
         self.add_adj_comlums_flag = False  # 是否在basic中合并adj数据，容易造成内存不够
 
+        self.MAX_RETRY = 5  # 最大重试次数
+
         if self.compute_change_position_flag:
             self.more_month = 1
         else:
@@ -67,6 +71,7 @@ class DownloadDataFromTushare_Baostock:
         except Exception as e:
             self.pro = None
             print(f"Tushare初始化失败：{e}")
+        
 
     def download_tushare_basic(self, start_date_str, end_date_str):
         if self.pro is None:
@@ -366,14 +371,35 @@ class DownloadDataFromTushare_Baostock:
     def _get_daily_basic(self, stock_list, start_date_str, end_date_str):
         basic_all = []
         basic_df = pd.DataFrame()
+        max_retry = self.MAX_RETRY  # 最大重试次数
         for i, stock_code in enumerate(tqdm(stock_list, desc='获取日线数据'), 1):
-            # 查询该股票在日期范围内的所有数据
-            tmp = self.pro.daily_basic(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
-            if len(tmp) > 0:
-                # print(f"daily_basic_正在查询第{i}/{len(stock_list)}只股票：{stock_code}，长度为：{len(tmp)}")
-                basic_all.append(tmp)
-            else:
-                print(f"daily_basic_ 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
+            retry_count = 0
+            success = False
+            tmp = None
+            retry_delay = 1  # 每只股票重置初始重试间隔为1秒
+            while retry_count < max_retry and not success:
+                try:
+                    # 查询该股票在日期范围内的所有数据
+                    tmp = self.pro.daily_basic(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
+                    success = True  # 成功获取，退出重试循环
+                    if len(tmp) > 0:
+                        basic_all.append(tmp)
+                    else:
+                        print(f"daily_basic_ 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
+                # 只捕获网络相关异常，非网络异常直接跳过重试
+                except (NameResolutionError, MaxRetryError, ConnectionError,TimeoutError,ConnectionResetError,requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count < max_retry:
+                        print(f"_get_daily_basic 获取{stock_code}数据失败（网络错误）：{str(e)[:50]}... 第{retry_count}次重试，等待{retry_delay}秒")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避，间隔翻倍
+                    else:
+                        print(f"_get_daily_basic 获取{stock_code}数据失败：{str(e)[:50]}... 已重试{max_retry}次，跳过该股票")
+                                # 非网络异常：直接终止重试，跳过该股票
+                except Exception as e:
+                    print(f"_get_daily_basic 获取失败（{stock_code}）：{e}，非网络错误，直接跳过")
+                    break  # 跳出while重试循环
+
             # 合并结果
         if basic_all:
             basic_all = [df for df in basic_all if not df.empty]
@@ -385,17 +411,33 @@ class DownloadDataFromTushare_Baostock:
     def _get_adj_factor(self, stock_list, start_date_str, end_date_str):
         adj_all = []
         adj_df = pd.DataFrame()
+        max_retry = self.MAX_RETRY  # 最大重试次数
         for i, stock_code in enumerate(tqdm(stock_list, desc='获取复权因子'), 1):
-            try:
-                # 调用Tushare复权因子接口
-                tmp = self.pro.adj_factor(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
-                if not tmp.empty:
-                    adj_all.append(tmp)
-                else:
-                    print(f"adj_factor 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
-            except Exception as e:
-                print(f"获取复权因子失败（{stock_code}）：{e}")
-                continue
+            retry_count = 0
+            success = False
+            tmp = None
+            retry_delay = 1  # 每只股票重置初始重试间隔为1秒
+            while retry_count < max_retry and not success:
+                try:
+                    # 调用Tushare复权因子接口
+                    tmp = self.pro.adj_factor(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
+                    success = True  # 成功获取，退出重试循环
+                    if not tmp.empty:
+                        adj_all.append(tmp)
+                    else:
+                        print(f"adj_factor 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
+                # 只捕获网络相关异常，非网络异常直接跳过重试
+                except (NameResolutionError, MaxRetryError, ConnectionError,TimeoutError,ConnectionResetError,requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count < max_retry:
+                        print(f"获取{stock_code}数据失败（网络错误）：{str(e)[:50]}... 第{retry_count}次重试，等待{retry_delay}秒")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避，间隔翻倍
+                    else:
+                        print(f"获取{stock_code}数据失败：{str(e)[:50]}... 已重试{max_retry}次，跳过该股票")
+                except Exception as e:
+                    print(f"获取复权因子失败（{stock_code}）：{e}")
+                    break
         if adj_all:  # 合并复权因子（过滤无效数据）
             adj_all = [df for df in adj_all if not df.empty]
             adj_df = pd.concat(adj_all, ignore_index=True)
@@ -407,17 +449,33 @@ class DownloadDataFromTushare_Baostock:
     def _get_daily(self, stock_list, start_date_str, end_date_str):
         daily_all = []
         daily_df = pd.DataFrame()
+        max_retry = self.MAX_RETRY  # 最大重试次数
         for i, stock_code in enumerate(tqdm(stock_list, desc='获取日线行情'), 1):
-            try:
-                # 调用Tushare复权因子接口
-                tmp = self.pro.daily(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
-                if not tmp.empty:
-                    daily_all.append(tmp)
-                else:
-                    print(f"daily 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
-            except Exception as e:
-                print(f"获取日线行情失败（{stock_code}）：{e}")
-                continue
+            retry_count = 0
+            success = False
+            tmp = None
+            retry_delay = 1  # 每只股票重置初始重试间隔为1秒
+            while retry_count < max_retry and not success:
+                try:
+                    # 调用Tushare复权因子接口
+                    tmp = self.pro.daily(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
+                    success = True  # 成功获取，退出重试循环
+                    if not tmp.empty:
+                        daily_all.append(tmp)
+                    else:
+                        print(f"daily 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
+                # 只捕获网络相关异常，非网络异常直接跳过重试
+                except (NameResolutionError, MaxRetryError, ConnectionError,TimeoutError,ConnectionResetError,requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count < max_retry:
+                        print(f"获取{stock_code}数据失败（网络错误）：{str(e)[:50]}... 第{retry_count}次重试，等待{retry_delay}秒")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避，间隔翻倍
+                    else:
+                        print(f"获取{stock_code}数据失败：{str(e)[:50]}... 已重试{max_retry}次，跳过该股票")
+                except Exception as e:
+                    print(f"获取日线行情失败（{stock_code}）：{e}")
+                    break
         if daily_all:  # 合并复权因子（过滤无效数据）
             adj_all = [df for df in daily_all if not df.empty]
             daily_df = pd.concat(adj_all, ignore_index=True)
@@ -930,20 +988,42 @@ class DownloadDataFromTushare_Baostock:
     def _update_get_finace_df(self, stock_list, type_fun, start_date_str, end_date_str, ):
         new_result_all = []
         new_result_df = pd.DataFrame()
+        max_retry = self.MAX_RETRY  # 最大重试次数
         for i, stock_code in enumerate(tqdm(stock_list, desc=f'[_update_get_finace_df] 获取{type_fun}数据'), 1):
-            if type_fun == 'fina_indicator':
-                tmp = self.pro.fina_indicator(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
-            elif type_fun == 'income':
-                tmp = self.pro.income(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
-            elif type_fun == 'balance':
-                tmp = self.pro.balancesheet(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
-            else:
-                print("无type_fun,无法识别接口")
-                return new_result_df
-            # print(f"fina_df_正在查询第{i}/{len(stock_list)}只股票：{stock_code}，长度为：{len(tmp)}")
-            if len(tmp) > 0:
-                new_result_all.append(tmp)
-            time.sleep(0.13)  # 控制请求频率
+            retry_count = 0
+            success = False
+            tmp = None
+            retry_delay = 1  # 每只股票重置初始重试间隔为1秒
+            while retry_count < max_retry and not success:
+                try:
+                    if type_fun == 'fina_indicator':
+                        tmp = self.pro.fina_indicator(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
+                    elif type_fun == 'income':
+                        tmp = self.pro.income(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
+                    elif type_fun == 'balance':
+                        tmp = self.pro.balancesheet(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
+                    else:
+                        print("无type_fun,无法识别接口")
+                        return new_result_df
+                    # print(f"fina_df_正在查询第{i}/{len(stock_list)}只股票：{stock_code}，长度为：{len(tmp)}")
+                    if len(tmp) > 0:
+                        new_result_all.append(tmp)
+                    success = True
+                # 只捕获网络相关异常，非网络异常直接跳过重试
+                except (NameResolutionError, MaxRetryError, ConnectionError,TimeoutError,ConnectionResetError,requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count < max_retry:
+                        print(f"_update_get_finace_df 获取{stock_code}数据失败（网络错误）：{str(e)[:50]}... 第{retry_count}次重试，等待{retry_delay}秒")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避，间隔翻倍
+                    else:
+                        print(f"_update_get_finace_df 获取{stock_code}数据失败：{str(e)[:50]}... 已重试{max_retry}次，跳过该股票")
+                # 非网络异常：直接终止重试，跳过该股票
+                except Exception as e:
+                    print(f"_update_get_finace_df 获取财务数据失败（{stock_code}）：{e}，非网络错误，直接跳过")
+                    break  # 跳出while重试循环
+                time.sleep(0.13)  # 控制请求频率
+                
         if new_result_all:
             new_result_df = pd.concat(new_result_all, ignore_index=True)
             if (len(new_result_df) > 0):
@@ -1470,9 +1550,30 @@ class DownloadDataFromTushare_Baostock:
     def _get_index_member_all(self, stock_list):
         all_industry_dfs = []
         industry_df = pd.DataFrame()
+        max_retry = self.MAX_RETRY  # 最大重试次数
         for stock in tqdm(stock_list, desc="万申分类"):
-            batch_df = self.pro.index_member_all(ts_code=stock)
-            all_industry_dfs.append(batch_df)
+            retry_count = 0
+            success = False
+            batch_df = None
+            retry_delay = 1  # 每只股票重置初始重试间隔为1秒
+            while retry_count < max_retry and not success:
+                try:
+                    batch_df = self.pro.index_member_all(ts_code=stock)
+                    success = True
+                    all_industry_dfs.append(batch_df)
+                # 只捕获网络相关异常，非网络异常直接跳过重试
+                except (NameResolutionError, MaxRetryError, ConnectionError,TimeoutError,ConnectionResetError,requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count < max_retry:
+                        print(f"_get_index_member_all 获取{stock}数据失败（网络错误）：{str(e)[:50]}... 第{retry_count}次重试，等待{retry_delay}秒")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避，间隔翻倍
+                    else:
+                        print(f"_get_index_member_all 获取{stock}数据失败：{str(e)[:50]}... 已重试{max_retry}次，跳过该股票")
+                except Exception as e:
+                    retry_count += 1
+                    print(f"_get_index_member_all 获取 {stock} 分类失败,非网络错误，直接跳过")
+                    break
             time.sleep(0.13)
         if not all_industry_dfs:
             print("所有批次查询失败，返回原表")
@@ -2298,18 +2399,36 @@ class DownloadDataFromTushare_Baostock:
         current_start = pd.to_datetime(start_date_str)
         total_end = pd.to_datetime(end_date_str)
         daily_df = pd.DataFrame()  # 初始化DataFrame（避免后续 concat 报错）
+        max_retry = self.MAX_RETRY  # 最大重试次数
         while current_start <= total_end:
+            retry_count = 0
+            success = False
+            temp_df = None
+            retry_delay = 1  # 每只股票重置初始重试间隔为1秒
             current_end = current_start + pd.DateOffset(months=3)  # 每3个月一批
             if current_end > total_end:
                 current_end = total_end
             curr_start_str = current_start.strftime('%Y%m%d')
             curr_end_str = current_end.strftime('%Y%m%d')
-            try:
-                temp_df = self.pro.index_daily(ts_code=index_code, start_date=curr_start_str,end_date=curr_end_str)
-                daily_df = pd.concat([daily_df, temp_df], ignore_index=True)
-            except Exception as e:
-                print(f"获取指数日线行情失败（{curr_start_str}-{curr_end_str}）：{e}")
-            current_start = current_end + pd.DateOffset(days=1)  # 避免重复日期
+            while retry_count < max_retry and not success:
+                try:
+                    temp_df = self.pro.index_daily(ts_code=index_code, start_date=curr_start_str,end_date=curr_end_str)
+                    success = True  # 成功获取，退出重试循环
+                    if not temp_df.empty:
+                        daily_df = pd.concat([daily_df, temp_df], ignore_index=True)
+                # 只捕获网络相关异常，非网络异常直接跳过重试
+                except (NameResolutionError, MaxRetryError, ConnectionError,TimeoutError,ConnectionResetError,requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count < max_retry:
+                        print(f"获取{index_code}数据失败（网络错误）：{str(e)[:50]}... 第{retry_count}次重试，等待{retry_delay}秒")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避，间隔翻倍
+                    else:
+                        print(f"获取{index_code}数据失败：{str(e)[:50]}... 已重试{max_retry}次，跳过该股票")
+                except Exception as e:
+                    print(f"获取指数日线行情失败（{curr_start_str}-{curr_end_str}）：{e}")
+                    break
+        current_start = current_end + pd.DateOffset(days=1)  # 避免重复日期
         # 权重数据清洗
         index_daily_df = daily_df.drop_duplicates(subset=['trade_date', 'ts_code'])  # 去重
         index_daily_df = index_daily_df.sort_values('trade_date')
@@ -2346,23 +2465,34 @@ class DownloadDataFromTushare_Baostock:
         print("download_tushare_shenwan_daily 下载完成")
 
     def _get_shenwan_daily_df(self, start_date_str, end_date_str):
-        current_start = pd.to_datetime(start_date_str)
-        total_end = pd.to_datetime(end_date_str)
         shenwan_df = pd.DataFrame()
-        total_days = (total_end - current_start).days + 1
         date_range = pd.date_range(start=start_date_str, end=end_date_str, freq='D').strftime('%Y%m%d')
-        successful_days = 0
+        max_retry = self.MAX_RETRY  # 最大重试次数
         # 使用 tqdm 创建进度条
         for curr_date_str in tqdm(date_range, desc="获取申万指数数据"):
-            try:
-                temp_df = self.pro.sw_daily(trade_date=curr_date_str, fields='ts_code,trade_date,open,close')
-                # temp_df['trade_date'] = curr_date_str
-                if not temp_df.empty:
-                    shenwan_df = pd.concat([shenwan_df, temp_df], ignore_index=True)
-                    successful_days += 1
-                time.sleep(0.33)# 一分钟200次
-            except Exception as e:
-                print(f"获取指数日线失败（{curr_date_str}：{e}")
+            retry_count = 0
+            success = False
+            temp_df = None
+            retry_delay = 1  # 每只股票重置初始重试间隔为1秒
+            while retry_count < max_retry and not success:
+                try:
+                    temp_df = self.pro.sw_daily(trade_date=curr_date_str, fields='ts_code,trade_date,open,close')
+                    # temp_df['trade_date'] = curr_date_str
+                    success = True  # 成功获取，退出重试循环
+                    if not temp_df.empty:
+                        shenwan_df = pd.concat([shenwan_df, temp_df], ignore_index=True)
+                    time.sleep(0.33)# 一分钟200次
+                # 只捕获网络相关异常，非网络异常直接跳过重试
+                except (NameResolutionError, MaxRetryError, ConnectionError,TimeoutError,ConnectionResetError,requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count < max_retry:
+                        print(f"获取{curr_date_str}数据失败（网络错误）：{str(e)[:50]}... 第{retry_count}次重试，等待{retry_delay}秒")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避，间隔翻倍
+                    else:
+                        print(f"获取{curr_date_str}数据失败：{str(e)[:50]}... 已重试{max_retry}次，跳过该股票")
+                except Exception as e:
+                    print(f"获取指数日线失败（{curr_date_str}：{e}")
         # 数据清洗
         if not shenwan_df.empty:
             index_shenwan_df = shenwan_df.drop_duplicates(subset=['ts_code','trade_date'])
@@ -2412,16 +2542,33 @@ class DownloadDataFromTushare_Baostock:
     def _get_updown_limit(self, stock_list, start_date_str, end_date_str):
         updown_limit_all = []
         updown_limit_df = pd.DataFrame()
+        max_retry = self.MAX_RETRY  # 最大重试次数
         for i, stock_code in enumerate(tqdm(stock_list, desc='获取涨跌停数据'), 1):
-            try:
-                tmp = self.pro.stk_limit(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
-                if not tmp.empty:
-                    updown_limit_all.append(tmp)
-                else:
-                    print(f"_get_updown_limit 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
-            except Exception as e:
-                print(f"获取涨跌停数据失败（{stock_code}）：{e}")
-                continue
+            retry_count = 0
+            success = False
+            tmp = None
+            retry_delay = 1  # 每只股票重置初始重试间隔为1秒
+            while retry_count < max_retry and not success:
+                try:
+                    tmp = self.pro.stk_limit(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
+                    success = True  # 成功获取，退出重试循环
+                    if not tmp.empty:
+                        updown_limit_all.append(tmp)
+                    else:
+                        print(f"_get_updown_limit 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
+                except (NameResolutionError, MaxRetryError, ConnectionError,TimeoutError,ConnectionResetError,requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count < max_retry:
+                        print(f"_get_updown_limit 获取{stock_code}数据失败（网络错误）：{str(e)[:50]}... 第{retry_count}次重试，等待{retry_delay}秒")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避，间隔翻倍
+                    else:
+                        print(f"_get_updown_limit 获取{stock_code}数据失败：{str(e)[:50]}... 已重试{max_retry}次，跳过该股票")
+                # 非网络异常：直接终止重试，跳过该股票
+                except Exception as e:
+                    print(f"_get_updown_limit 获取涨跌停数据失败（{stock_code}）：{e}，非网络错误，直接跳过")
+                    break  # 跳出while重试循环
+
         if updown_limit_all:  # 合并复权因子（过滤无效数据）
             updown_limit_all = [df for df in updown_limit_all if not df.empty]
             updown_limit_df = pd.concat(updown_limit_all, ignore_index=True)
@@ -2431,20 +2578,38 @@ class DownloadDataFromTushare_Baostock:
             print(f"共获取{len(updown_limit_df)}条涨跌停数据")
         return updown_limit_df
     
-    
+
     def _get_moneyflow(self, stock_list, start_date_str, end_date_str):
         moneyflow_all = []
         moneyflow_df = pd.DataFrame()
+        max_retry = self.MAX_RETRY  # 最大重试次数
         for i, stock_code in enumerate(tqdm(stock_list, desc='获取个股资金流向数据'), 1):
-            try:
-                tmp = self.pro.moneyflow(ts_code=stock_code, start_date=start_date_str, end_date=end_date_str)
-                if not tmp.empty:
-                    moneyflow_all.append(tmp)
-                else:
-                    print(f"_get_moneyflow 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
-            except Exception as e:
-                print(f"获取个股资金流向失败（{stock_code}）：{e}")
-                continue
+            retry_count = 0
+            success = False
+            tmp = None
+            retry_delay = 1  # 每只股票重置初始重试间隔为1秒
+            while retry_count < max_retry and not success:
+                try:
+                    tmp = self.pro.moneyflow(ts_code=stock_code,start_date=start_date_str,end_date=end_date_str)
+                    success = True  # 成功获取，退出重试循环
+                    if not tmp.empty:
+                        moneyflow_all.append(tmp)
+                    else:
+                        print(f"_get_moneyflow 未查询到股票{stock_code}数据，{start_date_str}---{end_date_str}")
+                # 只捕获网络相关异常，非网络异常直接跳过重试
+                except (NameResolutionError, MaxRetryError, ConnectionError,TimeoutError,ConnectionResetError,requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count < max_retry:
+                        print(f"_get_moneyflow 获取{stock_code}数据失败（网络错误）：{str(e)[:50]}... 第{retry_count}次重试，等待{retry_delay}秒")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避，间隔翻倍
+                    else:
+                        print(f"_get_moneyflow 获取{stock_code}数据失败：{str(e)[:50]}... 已重试{max_retry}次，跳过该股票")
+                # 非网络异常：直接终止重试，跳过该股票
+                except Exception as e:
+                    print(f"_get_moneyflow 获取个股资金流向失败（{stock_code}）：{e}，非网络错误，直接跳过")
+                    break  # 跳出while重试循环
+
         if moneyflow_all:  # 合并复权因子（过滤无效数据）
             moneyflow_all = [df for df in moneyflow_all if not df.empty]
             moneyflow_df = pd.concat(moneyflow_all, ignore_index=True)
