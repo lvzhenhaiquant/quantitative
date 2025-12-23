@@ -9,6 +9,9 @@ from .volatility import calc_volatility
 from .idio_vol import calc_idio_vol
 from .downside_vol import calc_downside_vol
 
+# 估值因子
+from .peg_ratio import calc_peg_ratio
+
 __all__ = [
     # 换手率因子
     'calc_turnover_mean',
@@ -19,4 +22,6 @@ __all__ = [
     'calc_volatility',
     'calc_idio_vol',
     'calc_downside_vol',
+    # 估值因子
+    'calc_peg_ratio',
 ]

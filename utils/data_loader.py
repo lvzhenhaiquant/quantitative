@@ -77,7 +77,8 @@ class DataLoader:
                           start_date: str,
                           end_date: str,
                           fields: List[str] = None,
-                          lookback_days: int = 0) -> pd.DataFrame:
+                          lookback_days: int = 0,
+                          adjust: bool = True) -> pd.DataFrame:
         """
         加载个股价格数据
 
@@ -93,6 +94,8 @@ class DataLoader:
             需要加载的字段，默认为 ['$close']
         lookback_days : int, optional
             向前回看的天数，默认为0
+        adjust : bool, optional
+            是否后复权，默认为 True
 
         Returns
         -------
@@ -111,14 +114,32 @@ class DataLoader:
 
         logger.info(f"Loading stock prices: {len(stock_list)} stocks, {actual_start} ~ {end_date}")
 
+        # 如果需要复权，自动加载 $factor
+        fields_to_load = list(fields)
+        if adjust and '$factor' not in fields_to_load:
+            fields_to_load.append('$factor')
+
         try:
             df = D.features(
                 stock_list,
-                fields,
+                fields_to_load,
                 start_time=actual_start,
                 end_time=end_date,
                 freq='day'
             )
+
+            # 后复权处理
+            if adjust and '$factor' in df.columns:
+                price_fields = ['$open', '$high', '$low', '$close', '$vwap']
+                for field in price_fields:
+                    if field in df.columns:
+                        df[field] = df[field] * df['$factor']
+
+                # 如果用户没有请求 $factor，删除它
+                if '$factor' not in fields:
+                    df.drop(columns=['$factor'], inplace=True)
+
+                logger.info(f"已应用后复权")
 
             logger.info(f"Loaded {len(df)} records")
             return df

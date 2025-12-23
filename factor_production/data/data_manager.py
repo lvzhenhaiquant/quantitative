@@ -54,7 +54,8 @@ class DataManager:
              stocks: Union[str, List[str]],
              start: str,
              end: str,
-             fields: List[str]) -> pl.DataFrame:
+             fields: List[str],
+             adjust: bool = True) -> pl.DataFrame:
         """
         加载数据
 
@@ -64,6 +65,7 @@ class DataManager:
             start: 开始日期 'YYYY-MM-DD'
             end: 结束日期 'YYYY-MM-DD'
             fields: 字段列表，如 ['$close', '$turnover_rate_f', '$pe_ttm']
+            adjust: 是否后复权，默认为 True
 
         Returns:
             Polars DataFrame，含 ['date', 'stock'] + 字段列
@@ -79,11 +81,16 @@ class DataManager:
             print("警告: 股票列表为空")
             return pl.DataFrame()
 
-        # 2. 从 QLib 加载数据
+        # 2. 如果需要复权，自动加载 $factor
+        fields_to_load = list(fields)
+        if adjust and '$factor' not in fields_to_load:
+            fields_to_load.append('$factor')
+
+        # 3. 从 QLib 加载数据
         try:
             df_pd = D.features(
                 instruments=stock_list,
-                fields=fields,
+                fields=fields_to_load,
                 start_time=start,
                 end_time=end,
                 freq='day'
@@ -96,13 +103,29 @@ class DataManager:
             print("警告: 加载的数据为空")
             return pl.DataFrame()
 
-        # 3. 转换为 Polars DataFrame
+        # 4. 后复权处理
+        if adjust and '$factor' in df_pd.columns:
+            price_fields = ['$open', '$high', '$low', '$close', '$vwap']
+            for field in price_fields:
+                if field in df_pd.columns:
+                    df_pd[field] = df_pd[field] * df_pd['$factor']
+
+            # 如果用户没有请求 $factor，删除它
+            if '$factor' not in fields:
+                df_pd.drop(columns=['$factor'], inplace=True)
+                fields_to_load.remove('$factor')
+
+            print("已应用后复权")
+
+        # 5. 转换为 Polars DataFrame
         df_pd = df_pd.reset_index()
-        df_pd.columns = ['stock', 'date'] + [f.replace('$', '') for f in fields]
+        # 使用实际加载的字段（可能包含或不包含 factor）
+        output_fields = [f for f in fields_to_load if f in df_pd.columns or f.replace('$', '') in df_pd.columns]
+        df_pd.columns = ['stock', 'date'] + [f.replace('$', '') for f in output_fields]
 
         df = pl.from_pandas(df_pd)
 
-        # 4. 确保日期格式正确
+        # 6. 确保日期格式正确
         df = df.with_columns(
             pl.col('date').cast(pl.Date)
         )
@@ -221,3 +244,65 @@ class DataManager:
         df = df.with_columns(pl.col('date').cast(pl.Date))
 
         return df
+
+    def load_financial(self,
+                       stocks: Union[str, List[str]],
+                       start: str,
+                       end: str,
+                       fields: List[str]) -> pl.DataFrame:
+        """
+        加载财报数据（已前向填充到日频）
+
+        Args:
+            stocks: 股票池名称或股票列表
+            start: 开始日期 'YYYY-MM-DD'
+            end: 结束日期 'YYYY-MM-DD'
+            fields: 财务字段列表，如 ['netprofit_yoy']
+
+        Returns:
+            Polars DataFrame，含 ['date', 'stock'] + 字段列
+        """
+        cache_dir = Path('/home/zhenhai1/quantitative/factor_production/cache/financial')
+
+        # 解析股票列表
+        if isinstance(stocks, str):
+            stock_list = set(self.get_pool_stocks(stocks, start, end))
+        else:
+            stock_list = set(stocks)
+
+        # 加载每个字段的 parquet 文件
+        all_dfs = []
+
+        for field in fields:
+            filepath = cache_dir / f"{field}.parquet"
+
+            if not filepath.exists():
+                print(f"警告: 财报数据文件不存在 {filepath}")
+                print(f"请先运行: python factor_production/data/download_financial.py")
+                continue
+
+            df = pl.read_parquet(filepath)
+
+            # 统一股票代码为大写
+            df = df.with_columns(pl.col('stock').str.to_uppercase())
+
+            # 筛选股票和日期范围
+            df = df.filter(
+                (pl.col('stock').is_in(list(stock_list))) &
+                (pl.col('date') >= pl.lit(start).str.to_date()) &
+                (pl.col('date') <= pl.lit(end).str.to_date())
+            )
+
+            all_dfs.append(df)
+
+        if not all_dfs:
+            return pl.DataFrame()
+
+        # 合并多个字段
+        result = all_dfs[0]
+        for df in all_dfs[1:]:
+            result = result.join(df, on=['stock', 'date'], how='outer')
+
+        print(f"财报数据加载完成: {len(result)} 行, {len(result.columns)} 列")
+
+        return result

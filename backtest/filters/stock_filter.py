@@ -157,10 +157,25 @@ class StockFilter:
         stock = self._normalize_stock(stock)
         return stock in self.get_limit_down_stocks(date)
 
+    def is_kcbj(self, stock: str) -> bool:
+        """
+        检查是否为科创板或北交所股票
+
+        科创板: 688xxx (上海)
+        北交所: 4xxxxx, 8xxxxx
+        """
+        stock = self._normalize_stock(stock)
+        code = stock.split('.')[0]
+
+        if code.startswith('68') or code.startswith('4') or code.startswith('8'):
+            return True
+        return False
+
     def is_tradable(self, stock: str, date,
                     exclude_st: bool = True,
                     exclude_suspend: bool = True,
-                    exclude_limit: bool = True) -> bool:
+                    exclude_limit: bool = True,
+                    exclude_kcbj: bool = False) -> bool:
         """
         检查股票是否可交易
 
@@ -170,11 +185,15 @@ class StockFilter:
             exclude_st: 是否排除ST
             exclude_suspend: 是否排除停牌
             exclude_limit: 是否排除涨跌停
+            exclude_kcbj: 是否排除科创板和北交所
 
         Returns:
             True 如果可交易
         """
         stock = self._normalize_stock(stock)
+
+        if exclude_kcbj and self.is_kcbj(stock):
+            return False
 
         if exclude_st and self.is_st(stock, date):
             return False
@@ -191,7 +210,8 @@ class StockFilter:
     def filter_stocks(self, stocks: List[str], date,
                       exclude_st: bool = True,
                       exclude_suspend: bool = True,
-                      exclude_limit: bool = True) -> List[str]:
+                      exclude_limit: bool = True,
+                      exclude_kcbj: bool = False) -> List[str]:
         """
         批量过滤股票
 
@@ -201,6 +221,7 @@ class StockFilter:
             exclude_st: 是否排除ST
             exclude_suspend: 是否排除停牌
             exclude_limit: 是否排除涨跌停
+            exclude_kcbj: 是否排除科创板和北交所
 
         Returns:
             过滤后的股票列表
@@ -224,6 +245,9 @@ class StockFilter:
         for stock in stocks:
             normalized = self._normalize_stock(stock)
             if normalized not in exclude_set:
+                # 科创板/北交所过滤（不需要日期，直接判断代码）
+                if exclude_kcbj and self.is_kcbj(normalized):
+                    continue
                 result.append(stock)  # 保持原格式
 
         return result

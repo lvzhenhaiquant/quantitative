@@ -30,7 +30,7 @@ backtest:
 
   # ========== 调仓频率 ==========
   rebalance:
-    freq: "weekly"           # 调仓频率: daily / weekly / monthly
+    freq: "monthly"          # 调仓频率: daily / weekly / monthly
 
   # ========== 风险控制 ==========
   risk:

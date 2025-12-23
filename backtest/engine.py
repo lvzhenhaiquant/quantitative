@@ -212,10 +212,13 @@ class BacktestEngine:
             'use_dynamic_rf': weight == 'max_sharpe',  # 最大夏普时用动态SHIBOR
         }
 
-        # 调仓频率
-        config['rebalance'] = {
-            'freq': 'weekly'
-        }
+        # 调仓频率（从配置文件读取）
+        import yaml
+        config_path = '/home/zhenhai1/quantitative/configs/backtest_config.yaml'
+        with open(config_path) as f:
+            file_config = yaml.safe_load(f)
+        freq = file_config.get('backtest', {}).get('rebalance', {}).get('freq', 'weekly')
+        config['rebalance'] = {'freq': freq}
 
         # 基准
         config['benchmark'] = {
