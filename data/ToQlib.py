@@ -12,6 +12,7 @@ from tqdm import tqdm
 class DataToQlib:
     def __init__(self, 
         qlib_data_dir_path=r"/home/yunbo/project/quantitative/qlib_data/cn_data",
+        qlib_min_data_dir_path=r"/home/yunbo/project/quantitative/qlib_data/cn_data_60min",
         dump_bin_py_path=r"/home/yunbo/project/quantitative/venv/lib/python3.10/site-packages/qlib/scripts/dump_bin.py"
     ):
         self.save_basic_folder_path = './download_data/basic'
@@ -31,6 +32,7 @@ class DataToQlib:
 
         self.qlib_data_dir = qlib_data_dir_path #qlib数据存放文件夹
         self.dump_bin_py = dump_bin_py_path #dump_bin.py路径
+        self.qlib_min_data_dir = qlib_min_data_dir_path
 
         self.code_to_csi = {
             "000016.SH": "csi50",  # 上证50
@@ -57,22 +59,22 @@ class DataToQlib:
     # -----------2222 方法二，单线程------------
     # 单线程版本，易理解
     def start_to_qlib_single_thread(self):
-        self.process(self.save_balancesheet_folder_path ,['ts_code', 'ann_date'],'6mon','dump_all','2、负债')
-        self.process(self.save_income_folder_path,['ts_code', 'ann_date'],'6mon','dump_all','3、利润')  # ← 已完成
-        self.process(self.save_fina_indicator_folder_path, ['ts_code', 'ann_date'],'6mon','dump_all','4、财务')
-        self.process(self.save_basic_folder_path, ['ts_code', 'trade_date'], 'day','dump_all','5、基础行情')  # ← 已转换,注释掉避免重复
-        self.process(self.save_adj_folder_path, ['ts_code', 'trade_date'], 'day','dump_all','6、复权因子')  # ← 已转换,注释掉避免重复
-        self.process(self.save_daily_folder_path, ['ts_code', 'trade_date'], 'day','dump_all', '7、日线行情')  # ← 已转换,注释掉避免重复
-        self.process(self.save_updown_limit_forlder_path, ['ts_code', 'trade_date'], 'day','dump_all', '8、涨跌停转换')  # ← 已转换,注释掉避免重复
-        self.process(self.save_moneyflow_folder_path, ['ts_code', 'trade_date'], 'day','dump_all', '9、 资金流转换')  # ← 已转换,注释掉避免重复
-        self.process(self.save_shenwan_daily_path, ['ts_code', 'trade_date'], 'day', 'dump_fix','10、申万指数日线行情')
-        self.process(self.save_index_daily_folder_path, ['ts_code', 'trade_date'], 'day','dump_fix', '11、指数日线行情')
-        # self.process(self.save_basic_30min_folder_path, ['ts_code', 'time'], '30min','dump_all','5、30分钟级别数据')
+        self.process(self.save_balancesheet_folder_path ,self.qlib_data_dir,['ts_code', 'ann_date'],'6mon','dump_all','2、负债')
+        self.process(self.save_income_folder_path,self.qlib_data_dir,['ts_code', 'ann_date'],'6mon','dump_all','3、利润')  # ← 已完成
+        self.process(self.save_fina_indicator_folder_path, self.qlib_data_dir,['ts_code', 'ann_date'],'6mon','dump_all','4、财务')
+        self.process(self.save_basic_folder_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day','dump_all','5、基础行情')  # ← 已转换,注释掉避免重复
+        self.process(self.save_adj_folder_path,self.qlib_data_dir, ['ts_code', 'trade_date'], 'day','dump_all','6、复权因子')  # ← 已转换,注释掉避免重复
+        self.process(self.save_daily_folder_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day','dump_all', '7、日线行情')  # ← 已转换,注释掉避免重复
+        self.process(self.save_updown_limit_forlder_path,self.qlib_data_dir, ['ts_code', 'trade_date'], 'day','dump_all', '8、涨跌停转换')  # ← 已转换,注释掉避免重复
+        self.process(self.save_moneyflow_folder_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day','dump_all', '9、 资金流转换')  # ← 已转换,注释掉避免重复
+        self.process(self.save_shenwan_daily_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day', 'dump_fix','10、申万指数日线行情')
+        self.process(self.save_index_daily_folder_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day','dump_fix', '11、指数日线行情')
+        self.process(self.save_basic_30min_folder_path, self.qlib_min_data_dir,['ts_code', 'trade_date'], '60min','dump_all','12、60分钟级别数据')
 
 
         print("全部 process 执行完毕")
 
-    def process(self, csv_folder_path, required_columns, frequency,dump_fun="dump_all", desc_str="qlib 转换"):
+    def process(self, csv_folder_path,qlib_data_dir, required_columns, frequency,dump_fun="dump_all", desc_str="qlib 转换"):
         # 使用pathlib处理路径
         folder_path = Path(csv_folder_path)
         if not folder_path.exists():
@@ -111,7 +113,7 @@ class DataToQlib:
             return
         # 构建命令 - 现在传入目录路径而不是单个文件
         try:
-            qlib_data_dir_path = Path(self.qlib_data_dir)
+            qlib_data_dir_path = Path(qlib_data_dir)
             dump_bin_py_path = Path(self.dump_bin_py)
             if not dump_bin_py_path.exists():
                 print(f"错误：dump_bin.py脚本不存在 - {dump_bin_py_path}")
