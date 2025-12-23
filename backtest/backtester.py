@@ -428,7 +428,7 @@ class Backtester:
         self.logger.info(f"权重方法: {self.weighting_method}")
         self.logger.info(f"动态无风险利率(SHIBOR): {self.use_dynamic_rf}")
         self.logger.info(f"股票池: {self.universe} (按日筛选: {self.filter_by_universe})")
-
+    
     def run(self, factor_name: str, factor_data: pd.DataFrame = None) -> Dict:
         """
         运行回测
@@ -453,7 +453,7 @@ class Backtester:
 
         # 1. 加载因子数据
         if factor_data is None:
-            from factor_production.factor_scheduler import FactorScheduler
+            # from factor_production.factor_scheduler import FactorScheduler
             scheduler = FactorScheduler(self.data_loader, {})
             factor_data = scheduler.load_factor_data(factor_name, freq='daily')
 
@@ -519,6 +519,14 @@ class Backtester:
 
         # 5. 执行回测
         self.logger.info("\n开始模拟交易...")
+        all_stocks = factor_data.index.unique().tolist()
+            # 计算需要的历史数据起始日期（lookback_days + buffer）
+        price_data_list = self.data_loader.load_stock_prices(
+            stock_list=all_stocks,
+            start_date=start_date,
+            end_date=end_date,
+            fields=['$close', '$open']
+        )
 
         for i, rebalance_date in enumerate(rebalance_dates, 1):
             self.logger.info(f"[{i}/{len(rebalance_dates)}] {rebalance_date}")
@@ -538,8 +546,9 @@ class Backtester:
                 continue
 
             # 加载当日价格
-            prices = self._load_prices(selected_stocks + list(portfolio.positions.keys()),
-                                      rebalance_date)
+            # prices = self._load_prices(selected_stocks + list(portfolio.positions.keys()),rebalance_date)
+            price_field = '$open' if self.trade_at_open else '$close'
+            prices = price_data_list.loc[pd.IndexSlice[selected_stocks + list(portfolio.positions.keys()), rebalance_date],price_field].reset_index(level=1, drop=True).dropna().to_dict()
 
             # 计算目标权重
             target_weights = self._calculate_weights(
