@@ -20,7 +20,8 @@ class DataToQlib:
         self.save_balancesheet_folder_path = './download_data/balancesheet'
         self.save_income_folder_path = './download_data/income'
         self.save_fina_indicator_folder_path = './download_data/fina_indicator'
-        self.save_basic_30min_folder_path = './download_data/basic_mins'
+        self.save_basic_60min_folder_path = './download_data/basic_60mins'
+        self.save_basic_5min_folder_path = './download_data/basic_5mins'
         self.save_daily_folder_path = './download_data/daily'
         self.save_index_path = './download_data/origin_download_index'
         self.save_index_daily_folder_path = './download_data/index_daily'
@@ -48,29 +49,22 @@ class DataToQlib:
         os.environ['PYTHONIOENCODING'] = 'utf-8'
         os.environ['PYTHONUTF8'] = '1'
 
-        #self.orgin_download_csv_path = './download_data/orgin_download_data/all_returns_adjusted_20220101_20251114.csv' #存储所有的股票csv
-
-        # #每个表的字段
-        # self.basic_fields = [] 自动读取所有列
-        # self.balancesheet_fields = []
-        # self.income_fields = []
-        # self.fina_indicator_fields = []
-
     # -----------2222 方法二，单线程------------
     # 单线程版本，易理解
     def start_to_qlib_single_thread(self):
         self.process(self.save_balancesheet_folder_path ,self.qlib_data_dir,['ts_code', 'ann_date'],'6mon','dump_all','2、负债')
-        self.process(self.save_income_folder_path,self.qlib_data_dir,['ts_code', 'ann_date'],'6mon','dump_all','3、利润')  # ← 已完成
+        self.process(self.save_income_folder_path,self.qlib_data_dir,['ts_code', 'ann_date'],'6mon','dump_all','3、利润') 
         self.process(self.save_fina_indicator_folder_path, self.qlib_data_dir,['ts_code', 'ann_date'],'6mon','dump_all','4、财务')
-        self.process(self.save_basic_folder_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day','dump_all','5、基础行情')  # ← 已转换,注释掉避免重复
-        self.process(self.save_adj_folder_path,self.qlib_data_dir, ['ts_code', 'trade_date'], 'day','dump_all','6、复权因子')  # ← 已转换,注释掉避免重复
-        self.process(self.save_daily_folder_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day','dump_all', '7、日线行情')  # ← 已转换,注释掉避免重复
-        self.process(self.save_updown_limit_forlder_path,self.qlib_data_dir, ['ts_code', 'trade_date'], 'day','dump_all', '8、涨跌停转换')  # ← 已转换,注释掉避免重复
-        self.process(self.save_moneyflow_folder_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day','dump_all', '9、 资金流转换')  # ← 已转换,注释掉避免重复
+        self.process(self.save_basic_folder_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day','dump_all','5、基础行情') 
+        self.process(self.save_adj_folder_path,self.qlib_data_dir, ['ts_code', 'trade_date'], 'day','dump_all','6、复权因子') 
+        self.process(self.save_daily_folder_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day','dump_all', '7、日线行情') 
+        self.process(self.save_updown_limit_forlder_path,self.qlib_data_dir, ['ts_code', 'trade_date'], 'day','dump_all', '8、涨跌停转换') 
+        self.process(self.save_moneyflow_folder_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day','dump_all', '9、 资金流转换') 
         self.process(self.save_shenwan_daily_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day', 'dump_fix','10、申万指数日线行情')
         self.process(self.save_index_daily_folder_path, self.qlib_data_dir,['ts_code', 'trade_date'], 'day','dump_fix', '11、指数日线行情')
-        self.process(self.save_basic_30min_folder_path, self.qlib_min_data_dir,['ts_code', 'trade_date'], '60min','dump_all','12、60分钟级别数据')
-
+        #分钟级别
+        self.process(self.save_basic_60min_folder_path, self.qlib_min_data_dir,['ts_code', 'trade_date'], '60min','dump_all','12、60分钟级别数据')
+        self.process(self.save_basic_5min_folder_path, self.qlib_min_data_dir,['ts_code', 'trade_date'], '5min','dump_all','13、5分钟级别数据')
 
         print("全部 process 执行完毕")
 

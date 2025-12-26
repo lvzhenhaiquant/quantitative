@@ -1,4 +1,5 @@
-import inspect
+
+from multiprocessing import Pool
 import os
 import shutil
 from asyncio import as_completed
@@ -6,19 +7,17 @@ from collections import defaultdict
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Optional
+from typing import Dict, Optional
 
 import numpy as np
 import requests
 import tushare as ts
 import pandas as pd
-from jedi.api import file_name
 from pandas.core.dtypes.common import is_object_dtype
 from tqdm import tqdm  # 看进度
-import baostock as bs
 from typing import List
+import json
 
-from tushare import new_stocks
 from urllib3.exceptions import NameResolutionError, MaxRetryError, ConnectionError
 
 
@@ -35,13 +34,15 @@ class DownloadDataFromTushare_Baostock:
         self.save_dir_fina_indicator = './download_data/fina_indicator'
         self.save_dir_income = './download_data/income'
         self.save_dir_balancesheet = './download_data/balancesheet'
-        self.save_dir_basic_mins = './download_data/basic_mins'
+        self.save_dir_basic_60mins = './download_data/basic_60mins'
+        self.save_dir_basic_5mins = './download_data/basic_5mins'
         self.save_dir_shenwan = './download_data/shenwan'
         self.save_dir_shenwan_daily = './download_data/shenwan_daily'
         self.save_dir_download_index = './download_data/origin_download_index'
         self.save_dir_index_daily = './download_data/index_daily'
         self.save_dir_updown_limit = './download_data/updown_limit'
         self.save_dir_moneyflow = './download_data/moneyflow'
+        self.save_dir_index_weight = './download_data/index_weight'
 
         self.index_mapping = {
             "上证50": "000016.SH",
@@ -53,12 +54,23 @@ class DownloadDataFromTushare_Baostock:
             "中证全指": "000985.SH",
             "创业板指": "399006.SZ",
         }
+        self.code_to_csi = {
+            "000016.SH": "csi50",  # 上证50
+            "000300.SH": "csi300",  # 沪深300
+            "000688.SH": "csi50kechuang",  # 科创50
+            "000852.SH": "csi1000",  # 中证1000
+            "000905.SH": "csi500",  # 中证500
+            "000906.SH": "csi800",  # 中证800
+            "000985.SH": "csiall",  # 中证全指
+            "399006.SZ": "csigg",  # 创业板指
+        }
 
         self.compute_change_position_flag = False  # 是否计算 _change_position_time 如月度调仓需要往前多获取一个月
         self.add_comlums_shenewn_flag = False  # 是否在下载数据中增加万申L1,L2,L3列，容易造成数据冗余
         self.add_adj_comlums_flag = False  # 是否在basic中合并adj数据，容易造成内存不够
 
-        self.MAX_RETRY = 5  # 最大重试次数
+        self.MAX_RETRY = 10  # 最大重试次数
+        self.MAX_WORKERS = 196  # 最大线程数
 
         if self.compute_change_position_flag:
             self.more_month = 1
@@ -1364,15 +1376,27 @@ class DownloadDataFromTushare_Baostock:
         # 转回列表格式
         return [list(item) for item in unique_ranges]
 
+    def _utils_convert_to_json(self, df_weight: pd.DataFrame) -> Dict[str, List[str]]:
+        """
+        将 DataFrame 转换为每日成分股 JSON 格式
+        Args:
+            df: index_weight 返回的 DataFrame
+        Returns:
+            {date: [stock1, stock2, ...]}
+        """
+        if df_weight.empty:
+            return {}
+        df_weight['con_code'] = df_weight['con_code'].str.split('.', expand=True).pipe(lambda df: df[1].str.upper() + df[0]).where(df_weight['con_code'].str.split('.').str.len() == 2, df_weight['con_code'])
+        # 按日期分组
+        result = {}
+        for trade_date, group in df_weight.groupby('trade_date'):
+            stocks = sorted(group['con_code'].tolist())
+            result[trade_date] = stocks
+        return result
+
     # -----↑↑↑↑------功能函数------↑↑↑↑------
 
     def download_baostock_basic_mins(self, start_date_str, end_date_str):
-        # 1. 初始化数据接口（添加异常捕获）
-        lg = bs.login()
-        if lg.error_code != '0':
-            print(f"BaoStock登录失败：{lg.error_msg}")
-            return
-
         # 2. 基础参数配置
         obtain_date_str = (pd.to_datetime(start_date_str, format='%Y%m%d') - pd.DateOffset(months=self.more_month)).strftime('%Y%m%d')  # '20220901'
 
@@ -1463,7 +1487,7 @@ class DownloadDataFromTushare_Baostock:
         print(f"调整后的数据已保存至{file_name_mins_adjusted}，共{len(file_name_mins_adjusted_df)}条记录")
 
         # 10 按股票代码分组，批量保存
-        self._save_substock_data(self.save_dir_basic_mins,file_name_mins_adjusted_df,0)
+        self._save_substock_data(self.save_dir_basic_60mins,file_name_mins_adjusted_df,0)
 
     def download_tushare_shenwan_classify(self):
         self.add_wanshen_classify(pd.DataFrame())
@@ -1623,11 +1647,6 @@ class DownloadDataFromTushare_Baostock:
 
 
     def updates_baostock_basic_mins(self, start_date_str, end_date_str):
-        lg = bs.login()
-        if lg.error_code != '0':
-            print(f"BaoStock登录失败：{lg.error_msg}")
-            return
-
         # 2. 基础参数配置
         file_name_30mins_basic_df_prefix = 'download_baostock_30mins_basic_df_'
         file_name_adj_df_prefix = 'download_adj_df_'
@@ -1737,10 +1756,13 @@ class DownloadDataFromTushare_Baostock:
         # 7 保存并删除
         self._to_new_csv_and_delete_old(file_name_30mins_adjusted, file_name_30mins_adjusted_df, begin_all_str,end_all_str,self.save_dir_download)
         # 8 单独保存至单股文件夹
-        self._save_substock_data(self.save_dir_basic_mins,file_name_30mins_adjusted_df,0)
+        self._save_substock_data(self.save_dir_basic_60mins,file_name_30mins_adjusted_df,0)
 
 
-    def _get_baostock_daily_basic_mins(self, all_stocks, start_date_str, end_date_str, frequency="60"):
+    def _get_baostock_daily_basic_mins_old(self, all_stocks, start_date_str, end_date_str, frequency="60"):
+        lg = bs.login()
+        if lg.error_code != '0':
+            print(f"BaoStock登录失败：{lg.error_msg}") 
         # 日期转换(baostock 使用 %Y-%m-%d， Tushare使用 %Y%m%d)
         start_date_str = datetime.strptime(start_date_str, "%Y%m%d").strftime("%Y-%m-%d")
         end_date_str = datetime.strptime(end_date_str, "%Y%m%d").strftime("%Y-%m-%d")
@@ -1749,7 +1771,7 @@ class DownloadDataFromTushare_Baostock:
         
         basic_mins_all = []
         basic_mins_df = pd.DataFrame()
-        max_retry = self.MAX_RETRY  # 从实例属性获取最大重试次数
+        max_retry = 5#self.MAX_RETRY  # 从实例属性获取最大重试次数
         retry_delay_base = 1  # 初始重试间隔为1秒
         
         for i, stock_code in enumerate(tqdm(all_stocks, desc=f'获取{frequency}分钟行情'), 1):
@@ -1820,6 +1842,190 @@ class DownloadDataFromTushare_Baostock:
             print(f"未获取到任何{frequency}分钟行情数据")
         return basic_mins_df
     
+    def _get_baostock_daily_basic_mins(self, all_stocks, start_date_str, end_date_str, frequency):
+        # -------------------------- 1. 基础格式转换（增加异常处理+参数校验） --------------------------
+        self.VALID_FREQUENCIES = {"5", "15", "30", "60"}  # Baostock合法分钟线频率
+        # 日期转换(baostock 使用 %Y-%m-%d， Tushare使用 %Y%m%d)
+        start_date_bs = datetime.strptime(start_date_str, "%Y%m%d").strftime("%Y-%m-%d")
+        end_date_bs = datetime.strptime(end_date_str, "%Y%m%d").strftime("%Y-%m-%d")
+        
+        # 校验分钟线频率
+        if str(frequency) not in self.VALID_FREQUENCIES:
+            print(f"非法的分钟线频率：{frequency}，仅支持{self.VALID_FREQUENCIES}")
+            return pd.DataFrame()
+        
+        # 转换股票代码格式：适配baostock（增加合法性校验）
+        all_stocks_bs = [f"{code.split('.')[1].lower()}.{code.split('.')[0]}" if len(code.split('.')) == 2 else code for code in all_stocks ]
+
+        all_stocks_bs = [conv_code for code in all_stocks if (conv_code := (f"{code.split('.')[1].lower()}.{code.split('.')[0]}" if len(code.split('.')) == 2 else code.lower())) and len(parts:=conv_code.split('.'))==2 and parts[0] in ['sz','sh'] and parts[1].isdigit() and len(parts[1])==6]
+        
+        if not all_stocks_bs:
+            print("无合法的股票代码，终止拉取")
+            return pd.DataFrame()
+        
+        # -------------------------- 2. 分批逻辑（保留你的原始逻辑） --------------------------
+        max_workers = self.MAX_WORKERS  # 从类属性获取进程数
+        batch_size = len(all_stocks_bs) // max_workers
+        if batch_size == 0:
+            batch_size = 1
+        
+        stock_batches = [all_stocks_bs[i:i + batch_size] for i in range(0, len(all_stocks_bs), batch_size)]
+
+        # -------------------------- 4. 多进程执行（增加异常处理） --------------------------
+        # 构造进程池参数（每个批次对应一个参数元组）
+        pool_args = [(batch, start_date_bs, end_date_bs, frequency, self.MAX_RETRY) for batch in stock_batches]
+        
+        # 启动进程池，处理所有批次
+        all_batch_results = []
+        with Pool(processes=max_workers) as pool:
+            try:
+                # 遍历进程结果（带进度条）
+                for batch_df in pool.imap_unordered(self._process_single_batch, pool_args):
+                    if not batch_df.empty:
+                        all_batch_results.append(batch_df)
+            except Exception as e:
+                print(f"进程池执行异常：{type(e).__name__} - {str(e)}")
+                pool.terminate()  # 终止所有子进程，避免挂死
+                return pd.DataFrame()
+
+        # -------------------------- 5. 最终数据合并与格式化（优化时间格式容错） --------------------------
+        if not all_batch_results:
+            print(f"未获取到任何{frequency}分钟数据")
+            return pd.DataFrame()
+        print(f"所有进程结束，处理数据...")
+        # 合并所有批次数据             
+        basic_mins_df = pd.concat(all_batch_results, ignore_index=True)
+        for col in ['close', 'open', 'high', 'low', 'volume', 'amount']:
+            basic_mins_df[col] = pd.to_numeric(basic_mins_df[col], errors='coerce')
+        # 还原股票代码为Tushare格式（sh.600000 → 600000.SH）
+        #basic_mins_df['code'] = basic_mins_df['code'].apply(lambda x: f"{x.split('.')[1]}.{x.split('.')[0].upper()}" if len(x.split('.'))==2 else x)
+        # basic_mins_df['code'] = basic_mins_df['code'].str.split('.', expand=True).pipe(lambda df: df[1] + '.' + df[0].str.upper()).where(basic_mins_df['code'].str.count('.') == 1, basic_mins_df['code'])
+        basic_mins_df['code'] = (lambda s: s[1] + '.' + s[0].str.upper()).__call__(basic_mins_df['code'].str.split('.', expand=True)).where(basic_mins_df['code'].str.split('.').str.len() == 2, basic_mins_df['code'])
+        basic_mins_df.rename(columns={'time': 'trade_date', 'code': 'ts_code'}, inplace=True)
+        basic_mins_df.drop(columns=['date'], inplace=True)
+        basic_mins_df['trade_date'] = pd.to_datetime(basic_mins_df['trade_date'],format='%Y%m%d%H%M%S%f',errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 过滤空值+添加factor列
+        basic_mins_df = basic_mins_df.drop_duplicates(subset=['ts_code','trade_date'], keep="first",ignore_index=True)
+        basic_mins_df['factor'] = 1
+
+        print(f"拉取完成！共获取{len(basic_mins_df)}条{frequency}分钟数据")
+        return basic_mins_df
+  
+    # -------------------------- 3. 进程处理核心函数（修复重试逻辑+补全导入） --------------------------
+    @staticmethod
+    def _process_single_batch(batch_args):# 不支持类方法，因为每个进程需要独立登录Baostock
+        """
+        子进程处理单个批次（独立登录Baostock，隔离Socket）
+        :param batch_args: tuple - (batch_stocks, start_bs, end_bs, frequency, max_retry)
+        :return: pd.DataFrame - 该批次的分钟线数据
+        """
+        import baostock as bs   #!!!独立修改过底层库文件，以支持多进程
+        import random
+        time.sleep(random.uniform(0, 2))
+        batch_stocks, start_bs, end_bs, frequency, max_retry = batch_args
+        # 子进程独立登录Baostock（关键：每个进程专属Socket）
+        pid = os.getpid() #获取当前进程ID
+        batch_data = []
+        retry_delay_base = 1  # 初始重试间隔
+        lg = None  # 登录实例
+        def login_with_retry():
+            """Baostock登录，失败时重试"""
+            login_retry = 30 #登录重试次数
+            nonlocal lg
+            login_retry_count = 0
+            login_delay = 1
+            while login_retry_count < login_retry:
+                try:
+                    # # 先登出旧会话（避免残留）
+                    # try:
+                    #     bs.logout()
+                    # except:
+                    #     pass
+                    # 重新登录
+                    lg = bs.login()
+                    if lg.error_code == '0':
+                        return True
+                    else:
+                        print(f"Pid:{pid}登录失败（第{login_retry_count+1}次）：{lg.error_msg}")
+                except Exception as e:
+                    print(f"Pid:{pid}登录异常（第{login_retry_count+1}次）：{str(e)[:50]}")
+                
+                login_retry_count += 1
+                if login_retry_count < login_retry:
+                    time.sleep(login_delay)
+                    login_delay *= 1.5  # 指数退避
+            
+            print(f"Pid:{pid}登录重试{login_retry}次失败，放弃该批次处理")
+            return False
+        
+        # -------------------------- 初始登录（带重试） --------------------------
+        if not login_with_retry():
+            return pd.DataFrame()
+
+        # 遍历批次内的每只股票
+        for i, stock_code in  enumerate(tqdm(batch_stocks, desc=f'Pid:{pid} 获取{frequency}mins 数据')):#:
+            retry_count = 0
+            success = False
+            retry_delay = retry_delay_base
+            while retry_count < max_retry and not success:
+                try:
+                    # 调用Baostock分钟接口
+                    rs = bs.query_history_k_data_plus(stock_code,"date,time,code,open,high,low,close,volume,amount",start_date=start_bs,end_date=end_bs,frequency=frequency,adjustflag="3")# 不复权
+                    
+                    # 检查接口返回（先判断错误，再标记success）
+                    if rs.error_code != '0':
+                        print(f"Pid:{pid} 【{stock_code}】接口返回错误：{rs.error_msg}")
+                        if "未登录" in rs.error_msg:
+                            print(f"Pid:{pid} 【{stock_code}】会话失效，重新登录...")
+                            login_with_retry()
+                        retry_count += 1  # 接口错误也重试（如临时限流）
+                        if retry_count < max_retry:
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                        continue
+                    
+                    # 提取数据
+                    data_list = []
+                    while rs.next():
+                        data_list.append(rs.get_row_data())
+                    
+                    if len(data_list) == 0:
+                        print(f"Pid:{pid} 【{stock_code}】无{frequency}分钟数据")
+                        success = True
+                        continue
+                    
+                    # 格式化数据
+                    df_temp = pd.DataFrame(data_list, columns=rs.fields)
+                    # 数值型转换
+                    batch_data.append(df_temp)
+                    success = True  # 只有处理成功才标记success
+                    time.sleep(random.uniform(0.05, 0.15))
+                # 网络异常重试（指数退避）
+                except (NameResolutionError, MaxRetryError, ConnectionError, TimeoutError,ConnectionResetError, requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count < max_retry:
+                        print(f"Pid:{pid} 【{stock_code}】网络错误({str(e)[:50]})，第{retry_count}次重试（等待{retry_delay}秒）")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                    else:
+                        print(f"Pid:{pid} 【{stock_code}】重试{max_retry}次失败，跳过")
+                
+                # 非网络异常直接跳过
+                except Exception as e:
+                    print(f"Pid:{pid} 【{stock_code}】异常：{e}，跳过")
+                    success = True  # 非网络异常，终止重试
+                    break
+        
+        # # 子进程登出Baostock
+        # bs.logout()
+        
+        # 合并批次内数据
+        if batch_data:
+            return pd.concat(batch_data, ignore_index=True)
+        return pd.DataFrame()
+
+
 
     def updates_tushare_A_basic(self, start_date_str, end_date_str):
         file_name_basic_df_prefix = 'download_A_basic_df_'
@@ -2107,32 +2313,32 @@ class DownloadDataFromTushare_Baostock:
             executor.submit(self._save_substock_data, self.save_dir_balancesheet, file_name_balance_df, 2)
 
     def updates_tushare_A_basic_mins(self, start_date_str, end_date_str):
-        lg = bs.login()
-        if lg.error_code != '0':
-            print(f"BaoStock登录失败：{lg.error_msg}")
-            return
-
         # 2. 基础参数配置
-        file_name_30mins_basic_df_prefix = 'download_A_60mins_basic_df_'
-        file_name_30mins_adjusted_df_prefix = 'all_returns_A_60mins_adjusted_'
+        file_name_60mins_basic_df_prefix = 'download_A_60mins_basic_df_'
+        file_name_5mins_basic_df_prefix = 'download_A_5mins_basic_df_'
 
-        file_name_30mins_basic, file_name_30mins_basic_df = self._utils_read_matched_csv_by_prefix(self.save_dir_download,file_name_30mins_basic_df_prefix)
-        if len(file_name_30mins_basic_df) == 0:
-            print(f"未读取到文件：{file_name_30mins_basic_df_prefix},请先下载原始数据")
+        file_name_60mins_basic, file_name_60mins_basic_df = self._utils_read_matched_csv_by_prefix(self.save_dir_download,file_name_60mins_basic_df_prefix)
+        if len(file_name_60mins_basic_df) == 0:
+            print(f"未读取到文件：{file_name_60mins_basic_df_prefix},请先下载原始数据")
             return
-        file_name_30mins_adjusted, file_name_30mins_adjusted_df = self._utils_read_matched_csv_by_prefix(self.save_dir_download,file_name_30mins_adjusted_df_prefix)
-        if len(file_name_30mins_adjusted_df) == 0:
-            print(f"未读取到文件：{file_name_30mins_adjusted_df_prefix},请先下载原始数据")
+        file_name_5mins_basic, file_name_5mins_basic_df = self._utils_read_matched_csv_by_prefix(self.save_dir_download,file_name_5mins_basic_df_prefix)
+        if len(file_name_5mins_basic_df) == 0:
+            print(f"未读取到文件：{file_name_5mins_basic_df_prefix},请先下载原始数据")
             return
-        file_name_30mins_adjusted_df = pd.DataFrame()  # 此文件为basic_df和adj_df 合并而来，设置为空防止占内存，后期赋值保存
 
-        old_start_str, old_end_str = self._utils_extract_date_from_filename(file_name_30mins_adjusted)
-        if file_name_30mins_adjusted:
-            if (end_date_str == old_start_str and start_date_str < end_date_str) or (start_date_str == old_end_str and end_date_str > start_date_str):
-                print("下载日期正确")
-            else:
-                print("[ updates_tushare_A_basic_mins ]下载日期设置错误")
-                # return
+        old_start_str, old_end_str = self._utils_extract_date_from_filename(file_name_60mins_basic)
+        if (end_date_str == old_start_str and start_date_str < end_date_str) or (start_date_str == old_end_str and end_date_str > start_date_str):
+            print("下载日期正确")
+        else:
+            print("[ updates_tushare_A_basic_mins ]下载日期设置错误")
+            return
+        old_start_str, old_end_str = self._utils_extract_date_from_filename(file_name_5mins_basic)
+        if (end_date_str == old_start_str and start_date_str < end_date_str) or (start_date_str == old_end_str and end_date_str > start_date_str):
+            print("下载日期正确")
+        else:
+            print("[ updates_tushare_A_basic_mins ]下载日期设置错误")
+            return
+        
         missing_start_end_list = self._utils_get_missing_date_ranges(old_start_str, old_end_str, start_date_str, end_date_str)
         begin_all_str = min(old_start_str, old_end_str, start_date_str, end_date_str)  # 所有日期首位相连或者重叠后的最边际日期
         end_all_str = max(old_start_str, old_end_str, start_date_str, end_date_str)
@@ -2150,85 +2356,82 @@ class DownloadDataFromTushare_Baostock:
         if len(all_stocks) == 0:
             print("无有效成分股数据，程序终止")
             return
-        old_stock_list = file_name_30mins_basic_df['ts_code'].dropna().unique().tolist()  # 老文件股列表
+        old_stock_list = file_name_60mins_basic_df['ts_code'].dropna().unique().tolist() # 老文件股列表
+        old_stock_list = [code for code in old_stock_list if code.lower().endswith(('.sh', '.sz'))  ]
         all_stocks = stock_basic_df['ts_code'].dropna().unique().tolist()  # 新日期内股票列表
         new_stock_list = list(set(all_stocks) - set(old_stock_list))
-
-        old_stock_list = [code for code in old_stock_list if code.lower().endswith(('.sh', '.sz'))  ]#baostock 只持仓sh和sz
         new_stock_list = [code for code in new_stock_list if code.lower().endswith(('.sh', '.sz'))  ]
-
         # 1、从未出现过的股票，日期最小取到最大
         if len(new_stock_list) > 0:
             print("-----获取新股票所有日期数据-----：")
             with ThreadPoolExecutor(max_workers=1) as executor:
-                new_30mins_basic_df = executor.submit(self._get_baostock_daily_basic_mins, new_stock_list, obtain_begin_all_str, end_all_str, frequency="60")
-                new_30mins_basic_df = new_30mins_basic_df.result()
+                new_60mins_basic_df = executor.submit(self._get_baostock_daily_basic_mins, new_stock_list, obtain_begin_all_str, end_all_str, frequency="60")
+                new_5mins_basic_df = executor.submit(self._get_baostock_daily_basic_mins, new_stock_list, obtain_begin_all_str, end_all_str, frequency="5")
+
+                new_60mins_basic_df = new_60mins_basic_df.result()
+                new_5mins_basic_df = new_5mins_basic_df.result()
             # 1.1获取基础日线行情
-            if len(new_30mins_basic_df) == 0:
+            if len(new_60mins_basic_df) == 0:
                 print("远程日线mins数据为空")
-            file_name_30mins_basic_df = pd.concat(
-                [file_name_30mins_basic_df, new_30mins_basic_df],
+            file_name_60mins_basic_df = pd.concat(
+                [file_name_60mins_basic_df, new_60mins_basic_df],
                 ignore_index=True,  # 重置索引（重要，避免索引冲突）
                 axis=0)  # 纵向追加（行级追加）
-
+            
+            if len(new_5mins_basic_df) == 0:
+                print("远程5分钟mins数据为空")
+            file_name_5mins_basic_df = pd.concat(
+                [file_name_5mins_basic_df, new_5mins_basic_df],
+                ignore_index=True,  # 重置索引（重要，避免索引冲突）
+                axis=0)  # 纵向追加（行级追加）
 
         # 2、对于老股票，补充缺失的时间段数据
         print("-----获取旧股票新日期数据-----：")
         for missing_start_str, missing_end_str in missing_start_end_list:
             obtain_missing_date_str = (pd.to_datetime(missing_start_str, format='%Y%m%d') - pd.DateOffset(months=self.more_month)).strftime('%Y%m%d')  # '20220901'
             with ThreadPoolExecutor(max_workers=1) as executor:
-                new_30mins_basic_df = executor.submit(self._get_baostock_daily_basic_mins, old_stock_list, obtain_missing_date_str, missing_end_str, frequency="60")
-                new_30mins_basic_df = new_30mins_basic_df.result()
+                new_60mins_basic_df = executor.submit(self._get_baostock_daily_basic_mins, old_stock_list, obtain_missing_date_str, missing_end_str, frequency="60")
+                new_5mins_basic_df = executor.submit(self._get_baostock_daily_basic_mins, old_stock_list, obtain_missing_date_str, missing_end_str, frequency="5")
+                new_60mins_basic_df = new_60mins_basic_df.result()
+                new_5mins_basic_df = new_5mins_basic_df.result()
+
             # 2.1获取基础日线行情
-            file_name_30mins_basic_df = pd.concat([file_name_30mins_basic_df, new_30mins_basic_df], ignore_index=True, axis=0)  # 纵向追加（行级追加）
+            file_name_60mins_basic_df = pd.concat([file_name_60mins_basic_df, new_60mins_basic_df], ignore_index=True, axis=0)  # 纵向追加（行级追加）
+            file_name_5mins_basic_df = pd.concat([file_name_5mins_basic_df, new_5mins_basic_df], ignore_index=True, axis=0)  # 纵向追加（行级追加）
 
         # # 3 排序并去重
-        file_name_30mins_basic_df = file_name_30mins_basic_df.sort_values(by=['ts_code', 'trade_date']).drop_duplicates(keep="first", ignore_index=True)  # 保留第一次出现的重复行（可改为"last"保留最后一次）# 去重后重置索引
-        file_name_30mins_basic_df['trade_date']=pd.to_datetime(file_name_30mins_basic_df['trade_date'],errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
+        file_name_60mins_basic_df = file_name_60mins_basic_df.drop_duplicates(subset=['ts_code', 'trade_date'], keep="first",ignore_index=True)#.sort_values(by=['ts_code', 'trade_date'])
+        file_name_60mins_basic_df['trade_date']=pd.to_datetime(file_name_60mins_basic_df['trade_date'],errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        file_name_5mins_basic_df = file_name_5mins_basic_df.drop_duplicates(subset=['ts_code', 'trade_date'], keep="first",ignore_index=True)#.sort_values(by=['ts_code', 'trade_date'])
+        file_name_5mins_basic_df['trade_date']=pd.to_datetime(file_name_5mins_basic_df['trade_date'],errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
+
         # 4 保存并删除
-        self._to_new_csv_and_delete_old(file_name_30mins_basic, file_name_30mins_basic_df, begin_all_str, end_all_str,self.save_dir_download)
-
-        file_name_30mins_adjusted_df = file_name_30mins_basic_df
-
-        # 6 月度调仓处理,增加 列['adjusted_month', 'is_current_stock'] 到file_name_adjusted_df表
-        if self.compute_change_position_flag:
-            file_name_30mins_adjusted_df = self._change_position_time(stock_basic_df, file_name_30mins_adjusted_df, "month", 1, start_date_str, end_date_str)
-
-        # 7 保存并删除
-        self._to_new_csv_and_delete_old(file_name_30mins_adjusted, file_name_30mins_adjusted_df, begin_all_str, end_all_str,self.save_dir_download)
+        self._to_new_csv_and_delete_old(file_name_60mins_basic, file_name_60mins_basic_df, begin_all_str, end_all_str,self.save_dir_download)
+        self._to_new_csv_and_delete_old(file_name_5mins_basic, file_name_5mins_basic_df, begin_all_str, end_all_str,self.save_dir_download)
         
-        file_name_30mins_basic_df['ts_code'] = file_name_30mins_basic_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
-        file_name_30mins_basic_df = file_name_30mins_basic_df.drop_duplicates(keep="first",ignore_index=True)
+        split_ts_mins = file_name_60mins_basic_df['ts_code'].str.split('.', expand=True)
+        file_name_60mins_basic_df['ts_code'] = split_ts_mins[1] + split_ts_mins[0]
+        
+        split_ts_5mins = file_name_5mins_basic_df['ts_code'].str.split('.', expand=True)
+        file_name_5mins_basic_df['ts_code'] = split_ts_5mins[1] + split_ts_5mins[0]
 
         # 8 单独保存至单股文件夹
         with ThreadPoolExecutor(max_workers=1) as executor:
-            executor.submit(self._save_substock_data, self.save_dir_basic_mins, file_name_30mins_basic_df, 0)
+            executor.submit(self._save_substock_data, self.save_dir_basic_60mins, file_name_60mins_basic_df, 0)
+            executor.submit(self._save_substock_data, self.save_dir_basic_5mins, file_name_5mins_basic_df, 0)
 
     def download_baostock_A_basic_mins(self, start_date_str, end_date_str):
-        # 1. 初始化数据接口（添加异常捕获）
-        lg = bs.login()
-        if lg.error_code != '0':
-            print(f"BaoStock登录失败：{lg.error_msg}")
-            return
-
         # 2. 基础参数配置
         obtain_date_str = (pd.to_datetime(start_date_str, format='%Y%m%d') - pd.DateOffset(months=self.more_month)).strftime('%Y%m%d')  # '20220901'
-
         # 文件名定义
         file_name_mins_basic = os.path.join(self.save_dir_download, f'download_A_60mins_basic_df_{start_date_str}_{end_date_str}.parquet')
-        file_name_mins_adjusted = os.path.join(self.save_dir_download, f'all_returns_A_60mins_adjusted_{start_date_str}_{end_date_str}.parquet')
+        file_name_5mins_basic = os.path.join(self.save_dir_download, f'download_A_5mins_basic_df_{start_date_str}_{end_date_str}.parquet')
 
         file_name_mins_basic_exists = os.path.exists(file_name_mins_basic)
-        file_name_mins_adjusted_exists = os.path.exists(file_name_mins_adjusted)
-        if file_name_mins_basic_exists and file_name_mins_adjusted_exists:
+        file_name_5mins_basic_exists = os.path.exists(file_name_5mins_basic)
+        if file_name_mins_basic_exists and file_name_5mins_basic_exists:
             print("[download_baostock_A_basic_mins] 以下2个文件均已存在，无需重复处理，程序退出!")
-            return
-
-        file_name_mins_basic_prefix = 'all_returns_A_60mins_adjusted_'
-        file_name_mins_basic_exist, temp1 = self._utils_read_matched_csv_by_prefix(self.save_dir_download,file_name_mins_basic_prefix)
-        temp1 = pd.DataFrame()
-        if file_name_mins_basic_exist:
-            print(f"{file_name_mins_basic_exist}文件已存在，请使用增量下载")
             return
 
         # 3. 分批获取股票列表
@@ -2239,6 +2442,8 @@ class DownloadDataFromTushare_Baostock:
 
         # 4 获取所有需查询的股票
         all_stocks = stock_basic_df['ts_code'].dropna().unique().tolist()
+        # df = pd.read_csv(r"/home/yunbo/project/quantitative/data/ts_trade_count.csv", usecols=['ts_code'])#手动查看缺失的数据，行数整数250，调试补充股票数据用
+        # all_stocks = df['ts_code'].dropna().drop_duplicates().tolist()
         if len(all_stocks) == 0:
             print("无有效成分股数据，程序终止")
             return
@@ -2252,53 +2457,83 @@ class DownloadDataFromTushare_Baostock:
                     return pd.DataFrame()
             else:
                 file_name_mins_basic_df = self._get_baostock_daily_basic_mins(all_stocks, obtain_date_str, end_date_str,frequency="60")
-                file_name_mins_basic_df.to_parquet(file_name_mins_basic, index=False, engine='pyarrow')
                 if len(file_name_mins_basic_df) == 0:
                     print("远程 60分钟线数据为空")
                     return pd.DataFrame()
+                file_name_mins_basic_df.to_parquet(file_name_mins_basic, index=False, engine='pyarrow')
             return file_name_mins_basic_df
+        
+        def get_5mins_basic_df():
+            if os.path.exists(file_name_5mins_basic):
+                file_name_5mins_basic_df = pd.read_parquet(file_name_5mins_basic, engine='pyarrow')
+                if len(file_name_5mins_basic_df) == 0:
+                    print("本地 5分钟线数据为空")
+                    return pd.DataFrame()
+            else:
+                file_name_5mins_basic_df = self._get_baostock_daily_basic_mins(all_stocks, obtain_date_str, end_date_str,frequency="5")
+                if len(file_name_5mins_basic_df) == 0:
+                    print("远程 5分钟线数据为空")
+                    return pd.DataFrame()
+                file_name_5mins_basic_df.to_parquet(file_name_5mins_basic, index=False, engine='pyarrow')
+            return file_name_5mins_basic_df
 
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             # 提交任务
             file_name_mins_basic_df = executor.submit(get_mins_basic_df)
+            file_name_5mins_basic_df = executor.submit(get_5mins_basic_df)
             # 获取结果
             file_name_mins_basic_df = file_name_mins_basic_df.result()
-        #  7 复权处理+合并数据
-        file_name_mins_adjusted_df = file_name_mins_basic_df
+            file_name_5mins_basic_df = file_name_5mins_basic_df.result()
 
-        # 9 增加月度调仓flag
-        if self.compute_change_position_flag:
-            file_name_mins_adjusted_df = self._change_position_time(stock_basic_df, file_name_mins_adjusted_df, "month", 1, start_date_str, end_date_str)
+        # 处理60分钟数据的ts_code（向量化替代apply）
+        split_ts_mins = file_name_mins_basic_df['ts_code'].str.split('.', expand=True)
+        file_name_mins_basic_df['ts_code'] = split_ts_mins[1] + split_ts_mins[0]
+        file_name_mins_basic_df = file_name_mins_basic_df.drop_duplicates(subset=['ts_code', 'trade_date'], keep="first",ignore_index=True)#.sort_values(by=['ts_code', 'trade_date'])
 
-        if self.add_comlums_shenewn_flag:
-            file_name_mins_adjusted_df = self.add_wanshen_classify(file_name_mins_adjusted_df)
+        # 处理5分钟数据的ts_code（向量化替代apply）
+        split_ts_5mins = file_name_5mins_basic_df['ts_code'].str.split('.', expand=True)#仅拆分一次ts_code列（避免重复计算，核心提速点）
+        file_name_5mins_basic_df['ts_code'] = split_ts_5mins[1] + split_ts_5mins[0]
+        file_name_5mins_basic_df = file_name_5mins_basic_df.drop_duplicates(subset=['ts_code', 'trade_date'], keep="first",ignore_index=True)#.sort_values(by=['ts_code', 'trade_date'])
 
-        # 8 保存 adjusted 数据
-        file_name_mins_adjusted_df.to_parquet(file_name_mins_adjusted, index=False, engine='pyarrow')
-        file_name_mins_basic_df['ts_code'] = file_name_mins_basic_df['ts_code'].apply(lambda x: f"{x.split('.')[1]}{x.split('.')[0]}")
-        file_name_mins_basic_df = file_name_mins_basic_df.sort_values(by=['ts_code', 'trade_date']).drop_duplicates(keep="first",ignore_index=True)
-
-        print(f"调整后的数据已保存至{file_name_mins_adjusted}，共{len(file_name_mins_adjusted_df)}条记录")
+        print(f"60mins数据已保存至{file_name_mins_basic}，共{len(file_name_mins_basic_df)}条记录")
+        print(f"5mins数据已保存至{file_name_5mins_basic}，共{len(file_name_5mins_basic_df)}条记录")
 
         # 10 按股票代码分组，批量保存
-        self._save_substock_data(self.save_dir_basic_mins, file_name_mins_basic_df, 0)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(self._save_substock_data,self.save_dir_basic_60mins, file_name_mins_basic_df, 0)
+            executor.submit(self._save_substock_data,self.save_dir_basic_5mins, file_name_5mins_basic_df, 0)
 
 
 
 
     def download_index(self,start_date_str,end_date_str):
         index_mapping = self.index_mapping
+        code_to_csi = self.code_to_csi
         if end_date_str is None:
             start_date_str = time.strftime("%Y%m%d")  # 默认当前日期
+        os.makedirs(self.save_dir_index_weight, exist_ok=True)
         for index_code in  tqdm(index_mapping.values(), desc='获取各种指数数据'):
             result_df = self._get_index_weight_df(index_code,start_date_str,end_date_str)
             csv_path = os.path.join(self.save_dir_download_index, f"index_basic_{index_code}_{start_date_str}_{end_date_str}.parquet")
             result_df.to_parquet(csv_path, index=False, engine='pyarrow')
-            #指数列表成分股单独转到qlib，不用单独保存另外文件夹
+            
+            # 指数列表成分股单独转到json，方便O(1)读取使用
+            result_df['trade_date'] = result_df['trade_date'].dt.strftime('%Y-%m-%d')
+            new_data = self._utils_convert_to_json(result_df)
+            sorted_data = dict(sorted(new_data.items()))
+            csi_name = code_to_csi[index_code]
+            # 保存 JSON 文件
+            filepath = os.path.join(self.save_dir_index_weight, f"{csi_name}.json")
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(sorted_data, f, ensure_ascii=False, indent=2)
+            print(f"已保存: {csv_path},{filepath}")  
+        
+        
 
     def update_index(self, start_date_str, end_date_str):
         index_mapping = self.index_mapping
+        code_to_csi = self.code_to_csi
         for index_name, index_code in tqdm(index_mapping.items(), desc="更新指数数据"):
             file_prefix = f"index_basic_{index_code}_"
             old_file_name, old_df = self._utils_read_matched_csv_by_prefix(self.save_dir_download_index,file_prefix)
@@ -2329,7 +2564,19 @@ class DownloadDataFromTushare_Baostock:
                 old_df["trade_date"] = pd.to_datetime(old_df["trade_date"])
                 old_df = old_df.sort_values("trade_date").reset_index(drop=True)
             self._to_new_csv_and_delete_old(old_file_name,old_df, begin_all_str, end_all_str,self.save_dir_download_index)
+
+                        # 指数列表成分股单独转到json，方便O(1)读取使用
+            old_df['trade_date'] = old_df['trade_date'].dt.strftime('%Y-%m-%d')
+            new_data = self._utils_convert_to_json(old_df)
+            sorted_data = dict(sorted(new_data.items()))
+            csi_name = code_to_csi[index_code]
+            # 保存 JSON 文件
+            filepath = os.path.join(self.save_dir_index_weight, f"{csi_name}.json")
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(sorted_data, f, ensure_ascii=False, indent=2)
+            print(f"已保存: {old_file_name},{filepath}") 
         print("\n所有指数更新流程执行完毕！")
+
 
     def download_index_daily(self, start_date_str, end_date_str):
         index_mapping = self.index_mapping
@@ -2611,8 +2858,9 @@ class DownloadDataFromTushare_Baostock:
         return moneyflow_df
     
 
-
+    # 暂时不使用baostock复权因子，统一使用tushare复权因子
     def _get_baostock_adj_factor(self, stock_list,start_date_str, end_date_str):
+        import baostock as bs
         start_date_str = datetime.strptime(start_date_str, "%Y%m%d").strftime("%Y-%m-%d")
         end_date_str = datetime.strptime(end_date_str, "%Y%m%d").strftime("%Y-%m-%d")
         stock_list = [f"{code.split('.')[1].lower()}.{code.split('.')[0]}" if len(code.split('.'))==2 else code for code in stock_list]
