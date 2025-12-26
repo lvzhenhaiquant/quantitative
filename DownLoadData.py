@@ -2422,11 +2422,14 @@ class DownloadDataFromTushare_Baostock:
             executor.submit(self._save_substock_data, self.save_dir_basic_5mins, file_name_5mins_basic_df, 0)
 
     def download_baostock_A_basic_mins(self, start_date_str, end_date_str):
+
         # 2. 基础参数配置
         obtain_date_str = (pd.to_datetime(start_date_str, format='%Y%m%d') - pd.DateOffset(months=self.more_month)).strftime('%Y%m%d')  # '20220901'
+
         # 文件名定义
         file_name_mins_basic = os.path.join(self.save_dir_download, f'download_A_60mins_basic_df_{start_date_str}_{end_date_str}.parquet')
         file_name_5mins_basic = os.path.join(self.save_dir_download, f'download_A_5mins_basic_df_{start_date_str}_{end_date_str}.parquet')
+
 
         file_name_mins_basic_exists = os.path.exists(file_name_mins_basic)
         file_name_5mins_basic_exists = os.path.exists(file_name_5mins_basic)
