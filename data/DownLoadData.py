@@ -2669,11 +2669,15 @@ class DownloadDataFromTushare_Baostock:
                     break
             current_start = current_end + pd.DateOffset(days=1)  # 避免重复日期
         # 权重数据清洗
-        index_daily_df = daily_df.drop_duplicates(subset=['trade_date', 'ts_code'])  # 去重
-        index_daily_df = index_daily_df.sort_values('trade_date')
-        index_daily_df['trade_date'] = pd.to_datetime(index_daily_df['trade_date'], format='%Y%m%d')  # 统一日期
-        print(f"index_daily_df 获取{len(index_daily_df)}条数据")
-        return index_daily_df
+        if len(daily_df)>0:
+            index_daily_df = daily_df.drop_duplicates(subset=['trade_date', 'ts_code'])  # 去重
+            index_daily_df = index_daily_df.sort_values('trade_date')
+            index_daily_df['trade_date'] = pd.to_datetime(index_daily_df['trade_date'], format='%Y%m%d')  # 统一日期
+            print(f"index_daily_df 获取{len(index_daily_df)}条数据")
+            return index_daily_df
+        else:
+             print(f"index_daily_df 获取空数据")
+             return pd.DataFrame()
 
 
 
