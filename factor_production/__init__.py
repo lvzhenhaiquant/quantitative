@@ -26,5 +26,6 @@
 
 from .data import DataManager
 from .engine import FactorEngine
+from .neutralize import FactorNeutralizer, neutralize_factor
 
-__all__ = ['DataManager', 'FactorEngine']
+__all__ = ['DataManager', 'FactorEngine', 'FactorNeutralizer', 'neutralize_factor']

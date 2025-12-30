@@ -1,19 +1,21 @@
 # 数据配置文件
 data:
-  # QLib数据路径
-  qlib_data_path: "/home/zhenhai1/quantitative/qlib_data/cn_data"
-
-  # 原始数据路径
+  # 原始数据路径 (Parquet 文件)
   raw_data_path: "/home/zhenhai1/quantitative/data/download_data"
 
   # 申万行业数据路径
   shenwan_path: "/home/zhenhai1/quantitative/data/download_data/shenwan/download_shenwan_stock_df_L1_L2_L3.csv"
 
-  # 指数成分股路径
-  instruments:
-    csi1000: "/home/zhenhai1/quantitative/qlib_data/cn_data/instruments/csi1000.txt"
-    csi300: "/home/zhenhai1/quantitative/qlib_data/cn_data/instruments/csi300.txt"
-    csi500: "/home/zhenhai1/quantitative/qlib_data/cn_data/instruments/csi500.txt"
+  # 指数成分股路径 (JSON 格式，每日成分股列表)
+  # 文件格式: {date: [stock1, stock2, ...]}
+  # 路径: raw_data_path/index_weight/csi1000.json
+  index_weight_path: "/home/zhenhai1/quantitative/data/download_data/index_weight"
+
+  # 因子缓存路径
+  factor_cache_path: "/home/zhenhai1/quantitative/factor_production/cache"
+
+  # 财报数据缓存路径
+  financial_cache_path: "/home/zhenhai1/quantitative/factor_production/cache/financial"
 
 # 基准指数配置
 benchmarks:
@@ -21,14 +23,35 @@ benchmarks:
   strategy_benchmark: "sh000852"  # 中证1000作为策略基准
 
 # 数据字段映射
+# 字段使用 $ 前缀，映射到 parquet 文件中的列名
 fields:
+  # 价格字段 -> daily/*.parquet
   price:
     close: "$close"
     open: "$open"
     high: "$high"
     low: "$low"
     volume: "$volume"
+    amount: "$amount"
 
+  # 市值字段 -> basic/*.parquet
   market_cap:
     total_mv: "$total_mv"
     circ_mv: "$circ_mv"
+
+  # 估值字段 -> basic/*.parquet
+  valuation:
+    pe_ttm: "$pe_ttm"
+    pb: "$pb"
+    ps_ttm: "$ps_ttm"
+
+  # 换手率 -> basic/*.parquet
+  turnover:
+    turnover_rate_f: "$turnover_rate_f"
+
+# 股票池映射
+pools:
+  csi300: "csi300"    # 沪深300
+  csi500: "csi500"    # 中证500
+  csi1000: "csi1000"  # 中证1000
+  csiall: "csiall"    # 中证全指

@@ -12,7 +12,10 @@ import numpy as np
 from typing import Dict, List
 import os
 import sys
+import struct
+from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
@@ -404,6 +407,38 @@ class Backtester:
         # 成分股缓存（避免重复加载）
         self._universe_cache = None
 
+        # 股票过滤配置（ST、停牌、涨跌停）
+        filter_config = config.get('stock_filter', {})
+        self.filter_st = filter_config.get('exclude_st', True)
+        self.filter_suspend = filter_config.get('exclude_suspend', True)
+        self.filter_limit = filter_config.get('exclude_limit', True)
+
+        # 初始化过滤器
+        self._stock_filter = None
+        if self.filter_st or self.filter_suspend or self.filter_limit:
+            try:
+                from backtest.filters import StockFilter
+                self._stock_filter = StockFilter()
+            except Exception as e:
+                self.logger.warning(f"股票过滤器初始化失败: {e}，将跳过过滤")
+
+        # 中性化配置
+        neutralize_config = config.get('neutralize', {})
+        self.neutralize_enabled = neutralize_config.get('enabled', False)
+        self.neutralize_how = neutralize_config.get('how', ['industry', 'market_cap'])
+        self.neutralize_industry_level = neutralize_config.get('industry_level', 2)
+        self.neutralize_cap_col = neutralize_config.get('market_cap_col', 'circ_mv')
+
+        # 初始化中性化器
+        self._neutralizer = None
+        if self.neutralize_enabled:
+            try:
+                from factor_production.neutralize import FactorNeutralizer
+                self._neutralizer = FactorNeutralizer(industry_level=self.neutralize_industry_level)
+                self.logger.info(f"中性化: {self.neutralize_how}, 行业级别={self.neutralize_industry_level}")
+            except Exception as e:
+                self.logger.warning(f"中性化器初始化失败: {e}，将跳过中性化")
+
         # 创建结果保存目录
         self.save_dir = config.get('output', {}).get('save_dir', 'backtest/results')
         os.makedirs(self.save_dir, exist_ok=True)
@@ -423,12 +458,23 @@ class Backtester:
         # 价格数据缓存（用于权重优化）
         self.price_df_cache = None
 
+        # 交易价格缓存（预加载到内存，加速回测）
+        # 格式: {date_str: {stock: {'open': price, 'close': price}}}
+        self.trade_price_cache = {}
+
+        # QLib 数据配置
+        self.qlib_path = config.get('qlib_path', '/home/zhenhai1/quantitative/qlib_data/cn_data')
+        self.use_qlib = config.get('use_qlib', True)  # 默认使用 QLib 数据
+        self._qlib_calendar = None
+        self._qlib_calendar_index = None
+
         self.logger.info("Backtester初始化完成")
         self.logger.info(f"交易时机: {'开盘价' if self.trade_at_open else '收盘价'}")
         self.logger.info(f"权重方法: {self.weighting_method}")
         self.logger.info(f"动态无风险利率(SHIBOR): {self.use_dynamic_rf}")
         self.logger.info(f"股票池: {self.universe} (按日筛选: {self.filter_by_universe})")
-    
+        self.logger.info(f"过滤: ST={self.filter_st}, 停牌={self.filter_suspend}, 涨跌停={self.filter_limit}")
+
     def run(self, factor_name: str, factor_data: pd.DataFrame = None) -> Dict:
         """
         运行回测
@@ -453,7 +499,7 @@ class Backtester:
 
         # 1. 加载因子数据
         if factor_data is None:
-            # from factor_production.factor_scheduler import FactorScheduler
+            from factor_production.factor_scheduler import FactorScheduler
             scheduler = FactorScheduler(self.data_loader, {})
             factor_data = scheduler.load_factor_data(factor_name, freq='daily')
 
@@ -468,6 +514,11 @@ class Backtester:
 
         self.logger.info(f"因子数据: {len(factor_data)}条记录, "
                        f"{factor_data['date'].nunique()}个交易日")
+
+        # 1.2 因子中性化（行业+市值）
+        if self.neutralize_enabled and self._neutralizer is not None:
+            self.logger.info("开始因子中性化...")
+            factor_data = self._neutralize_factor(factor_data, factor_name)
 
         # 2. 筛选调仓日
         rebalance_dates = self._get_rebalance_dates(factor_data)
@@ -486,7 +537,40 @@ class Backtester:
             end_date
         )
 
-        # 4.1 加载历史价格数据（用于min_vol/max_sharpe权重优化）
+        # 4.1 预加载所有交易价格到内存（加速回测）
+        self.logger.info("预加载交易价格数据到内存...")
+        all_stocks = factor_data.index.unique().tolist()
+
+        if self.use_qlib:
+            # 使用 QLib bin 文件加载（更快）
+            self.trade_price_cache = self._load_qlib_prices(all_stocks, start_date, end_date)
+        else:
+            # 使用 Parquet 加载
+            price_data = self.data_loader.load_stock_prices(
+                stock_list=all_stocks,
+                start_date=start_date,
+                end_date=end_date,
+                fields=['$open', '$close'],
+                adjust=True  # 后复权
+            )
+
+            if price_data is not None and len(price_data) > 0:
+                # 构建缓存: {date_str: {stock: {'open': price, 'close': price}}}
+                self.trade_price_cache = {}
+                for (stock, date), row in price_data.iterrows():
+                    date_str = date.strftime('%Y-%m-%d')
+                    if date_str not in self.trade_price_cache:
+                        self.trade_price_cache[date_str] = {}
+                    self.trade_price_cache[date_str][stock] = {
+                        'open': row['$open'],
+                        'close': row['$close']
+                    }
+                self.logger.info(f"价格缓存: {len(self.trade_price_cache)} 个交易日, {len(all_stocks)} 只股票")
+            else:
+                self.logger.warning("价格数据加载失败，将使用逐日加载模式")
+                self.trade_price_cache = {}
+
+        # 4.2 加载历史价格数据（用于min_vol/max_sharpe权重优化）
         if self.weighting_method in ['min_vol', 'max_sharpe']:
             self.logger.info("加载历史价格数据用于权重优化...")
             # 获取所有可能涉及的股票
@@ -497,7 +581,8 @@ class Backtester:
                 stock_list=all_stocks,
                 start_date=lookback_start.strftime('%Y-%m-%d'),
                 end_date=end_date,
-                fields=['$close']
+                fields=['$close'],
+                adjust=True  # 后复权
             )
             # 转换为宽表格式：index=日期, columns=股票代码
             if price_data is not None and len(price_data) > 0:
@@ -519,52 +604,75 @@ class Backtester:
 
         # 5. 执行回测
         self.logger.info("\n开始模拟交易...")
-        all_stocks = factor_data.index.unique().tolist()
-            # 计算需要的历史数据起始日期（lookback_days + buffer）
-        price_data_list = self.data_loader.load_stock_prices(
-            stock_list=all_stocks,
-            start_date=start_date,
-            end_date=end_date,
-            fields=['$close', '$open']
-        )
 
-        for i, rebalance_date in enumerate(rebalance_dates, 1):
-            self.logger.info(f"[{i}/{len(rebalance_dates)}] {rebalance_date}")
+        # 获取所有交易日（用于每日记录净值）
+        all_trading_dates = sorted(factor_data['date'].unique())
+        rebalance_set = set(rebalance_dates)  # 转为集合便于查找
 
-            # 获取这天的因子值
-            factor_values = factor_data[factor_data['date'] == rebalance_date]
+        self.logger.info(f"交易日: {len(all_trading_dates)}, 调仓日: {len(rebalance_dates)}")
 
-            if len(factor_values) == 0:
-                self.logger.warning(f"  跳过: 无因子数据")
-                continue
+        for i, current_date in enumerate(all_trading_dates, 1):
+            is_rebalance_day = current_date in rebalance_set
 
-            # 选股（传入日期用于筛选当日成分股，避免未来函数）
-            selected_stocks = self._select_stocks(factor_values, factor_name, date=rebalance_date)
+            # 加载当日价格（用于记录净值）
+            stocks_to_load = list(portfolio.positions.keys())
 
-            if len(selected_stocks) == 0:
-                self.logger.warning(f"  跳过: 选股为空（可能当日成分股不足）")
-                continue
+            # 如果是调仓日，执行调仓
+            if is_rebalance_day:
+                self.logger.info(f"[调仓] {current_date}")
 
-            # 加载当日价格
-            # prices = self._load_prices(selected_stocks + list(portfolio.positions.keys()),rebalance_date)
-            price_field = '$open' if self.trade_at_open else '$close'
-            prices = price_data_list.loc[pd.IndexSlice[selected_stocks + list(portfolio.positions.keys()), rebalance_date],price_field].reset_index(level=1, drop=True).dropna().to_dict()
+                # 获取前一交易日的因子值（避免未来函数）
+                prev_dates = [d for d in all_trading_dates if d < current_date]
+                if len(prev_dates) == 0:
+                    self.logger.warning(f"  跳过: 无前一交易日因子数据")
+                    prices = self._load_prices(stocks_to_load, current_date) if stocks_to_load else {}
+                    portfolio.record_state(current_date, prices)
+                    continue
 
-            # 计算目标权重
-            target_weights = self._calculate_weights(
-                selected_stocks, factor_values, factor_name,
-                current_date=pd.Timestamp(rebalance_date)
-            )
+                prev_factor_date = prev_dates[-1]
+                factor_values = factor_data[factor_data['date'] == prev_factor_date]
 
-            # 调仓
-            portfolio.rebalance(target_weights, prices, rebalance_date)
+                # 设置股票代码为索引
+                if 'stock' in factor_values.columns:
+                    factor_values = factor_values.set_index('stock')
 
-            # 记录状态
-            portfolio.record_state(rebalance_date, prices)
+                if len(factor_values) == 0:
+                    self.logger.warning(f"  跳过: 无因子数据")
+                    prices = self._load_prices(stocks_to_load, current_date) if stocks_to_load else {}
+                    portfolio.record_state(current_date, prices)
+                    continue
 
-            self.logger.info(f"  选股: {len(selected_stocks)}只, "
-                           f"持仓: {len(portfolio.positions)}只, "
-                           f"净值: {portfolio.calculate_portfolio_value(prices)/self.initial_cash:.4f}")
+                # 选股
+                selected_stocks = self._select_stocks(factor_values, factor_name, date=current_date)
+
+                if len(selected_stocks) == 0:
+                    self.logger.warning(f"  跳过: 选股为空")
+                    prices = self._load_prices(stocks_to_load, current_date) if stocks_to_load else {}
+                    portfolio.record_state(current_date, prices)
+                    continue
+
+                # 加载价格（包括选中股票和当前持仓）
+                stocks_to_load = list(set(selected_stocks + list(portfolio.positions.keys())))
+                prices = self._load_prices(stocks_to_load, current_date)
+
+                # 计算目标权重
+                target_weights = self._calculate_weights(
+                    selected_stocks, factor_values, factor_name,
+                    current_date=pd.Timestamp(current_date)
+                )
+
+                # 调仓
+                portfolio.rebalance(target_weights, prices, current_date)
+
+                self.logger.info(f"  选股: {len(selected_stocks)}只, "
+                               f"持仓: {len(portfolio.positions)}只, "
+                               f"净值: {portfolio.calculate_portfolio_value(prices)/self.initial_cash:.4f}")
+            else:
+                # 非调仓日，只加载持仓股票价格
+                prices = self._load_prices(stocks_to_load, current_date) if stocks_to_load else {}
+
+            # 每个交易日都记录净值
+            portfolio.record_state(current_date, prices)
 
         # 6. 业绩分析
         self.logger.info("\n开始业绩分析...")
@@ -657,7 +765,7 @@ class Backtester:
     def _select_stocks(self, factor_values: pd.DataFrame, factor_name: str,
                        date: str = None) -> List[str]:
         """
-        选股（先筛选当日成分股，再按因子排序）
+        选股（先筛选当日成分股，过滤ST/停牌/涨跌停，再按因子排序）
 
         Parameters
         ----------
@@ -666,24 +774,57 @@ class Backtester:
         factor_name : str
             因子名称
         date : str, optional
-            调仓日期（用于筛选当日成分股）
+            调仓日期（用于筛选当日成分股和过滤）
 
         Returns
         -------
         List[str]
             选中的股票列表
         """
+        # DEBUG: 打印初始状态
+        # self.logger.debug(f"  [选股] 初始因子数据: {len(factor_values)} 行, 列: {factor_values.columns.tolist()}")
+
         # 1. 先筛选当日成分股（避免未来函数）
         if date and self.filter_by_universe:
             universe_stocks = self._get_universe_stocks(date)
             if universe_stocks:
+                # 转换为大写以匹配因子数据的股票代码格式
+                universe_stocks = [s.upper() for s in universe_stocks]
                 # 只保留当日是成分股的股票
+                before = len(factor_values)
                 factor_values = factor_values[factor_values.index.isin(universe_stocks)]
+                # self.logger.debug(f"  [选股] 筛选成分股: {before} -> {len(factor_values)}")
 
         if len(factor_values) == 0:
+            self.logger.warning(f"  [选股] 筛选成分股后为空")
             return []
 
-        # 2. 按因子排序选股
+        # 2. 过滤ST、停牌、涨跌停股票
+        if date and self._stock_filter is not None:
+            all_stocks = factor_values.index.tolist()
+            filtered_stocks = self._stock_filter.filter_stocks(
+                all_stocks,
+                date,
+                exclude_st=self.filter_st,
+                exclude_suspend=self.filter_suspend,
+                exclude_limit=self.filter_limit
+            )
+            before = len(factor_values)
+            factor_values = factor_values[factor_values.index.isin(filtered_stocks)]
+            # self.logger.debug(f"  [选股] 过滤ST/停牌/涨跌停: {before} -> {len(factor_values)}")
+
+        if len(factor_values) == 0:
+            self.logger.warning(f"  [选股] 过滤ST/停牌/涨跌停后为空")
+            return []
+
+        # 3. 过滤因子值为 NaN 的股票
+        before = len(factor_values)
+        factor_values = factor_values[factor_values[factor_name].notna()]
+        if len(factor_values) == 0:
+            self.logger.warning(f"  [选股] 因子值全为NaN (原有 {before} 只)")
+            return []
+
+        # 4. 按因子排序选股
         if self.selection_method == 'top_n':
             sorted_stocks = factor_values.sort_values(factor_name, ascending=self.ascending)
             return sorted_stocks.head(self.n_stocks).index.tolist()
@@ -751,8 +892,26 @@ class Backtester:
             raise ValueError(f"不支持的权重方法: {self.weighting_method}")
 
     def _load_prices(self, stocks: List[str], date: str) -> Dict[str, float]:
-        """加载指定日期的股票价格（根据配置使用开盘价或收盘价）"""
+        """加载指定日期的股票价格（优先从缓存读取，大幅提升速度）"""
         # 根据配置选择价格字段
+        price_key = 'open' if self.trade_at_open else 'close'
+
+        prices = {}
+
+        # 优先从缓存读取（注意：缓存中股票代码为小写）
+        if date in self.trade_price_cache:
+            cache_day = self.trade_price_cache[date]
+            for stock in stocks:
+                # 尝试小写匹配（缓存中是小写）
+                stock_lower = stock.lower()
+                if stock_lower in cache_day:
+                    price = cache_day[stock_lower][price_key]
+                    if not pd.isna(price):
+                        prices[stock] = price  # 返回原始大小写格式
+            return prices
+
+        # 缓存未命中，回退到逐日加载（理论上不应该发生）
+        self.logger.warning(f"价格缓存未命中: {date}，使用逐日加载")
         price_field = '$open' if self.trade_at_open else '$close'
 
         prices_df = self.data_loader.load_stock_prices(
@@ -762,7 +921,6 @@ class Backtester:
             fields=[price_field]
         )
 
-        prices = {}
         for stock in stocks:
             try:
                 if stock in prices_df.index.get_level_values(0):
@@ -774,6 +932,194 @@ class Backtester:
                 pass
 
         return prices
+
+    def _load_qlib_calendar(self):
+        """加载 QLib 交易日历"""
+        if self._qlib_calendar is not None:
+            return self._qlib_calendar
+
+        cal_file = Path(self.qlib_path) / 'calendars' / 'day.txt'
+        with open(cal_file, 'r') as f:
+            self._qlib_calendar = [line.strip() for line in f if line.strip()]
+        self._qlib_calendar_index = {d: i for i, d in enumerate(self._qlib_calendar)}
+        return self._qlib_calendar
+
+    def _read_qlib_bin(self, filepath: Path) -> tuple:
+        """读取 QLib bin 文件，返回 (start_idx, data)"""
+        if not filepath.exists():
+            return None, None
+
+        with open(filepath, 'rb') as f:
+            start_idx = struct.unpack('<f', f.read(4))[0]
+            data = np.frombuffer(f.read(), dtype=np.float32)
+
+        return int(start_idx), data
+
+    def _load_qlib_prices(self, stocks: List[str], start_date: str, end_date: str) -> dict:
+        """
+        从 QLib bin 文件加载价格数据到内存
+
+        Returns:
+            {date_str: {stock: {'open': price, 'close': price}}}
+        """
+        self.logger.info("从 QLib 加载价格数据...")
+
+        calendar = self._load_qlib_calendar()
+        start_idx = self._qlib_calendar_index.get(start_date, 0)
+        end_idx = self._qlib_calendar_index.get(end_date, len(calendar) - 1)
+        dates = calendar[start_idx:end_idx + 1]
+
+        features_path = Path(self.qlib_path) / 'features'
+
+        def load_stock(stock):
+            stock_lower = stock.lower()
+            stock_dir = features_path / stock_lower
+
+            if not stock_dir.exists():
+                return stock, None, None
+
+            # 读取开盘价和收盘价
+            open_file = stock_dir / 'open.day.bin'
+            close_file = stock_dir / 'close.day.bin'
+
+            open_start, open_data = self._read_qlib_bin(open_file)
+            close_start, close_data = self._read_qlib_bin(close_file)
+
+            if open_data is None or close_data is None:
+                return stock, None, None
+
+            # 提取需要的日期范围
+            open_result = {}
+            close_result = {}
+
+            for date in dates:
+                cal_idx = self._qlib_calendar_index[date]
+
+                # 开盘价
+                if open_data is not None:
+                    data_idx = cal_idx - open_start
+                    if 0 <= data_idx < len(open_data):
+                        val = open_data[data_idx]
+                        if not np.isnan(val):
+                            open_result[date] = float(val)
+
+                # 收盘价
+                if close_data is not None:
+                    data_idx = cal_idx - close_start
+                    if 0 <= data_idx < len(close_data):
+                        val = close_data[data_idx]
+                        if not np.isnan(val):
+                            close_result[date] = float(val)
+
+            return stock, open_result, close_result
+
+        # 并行加载
+        from tqdm import tqdm
+        with ThreadPoolExecutor(max_workers=64) as executor:
+            results = list(tqdm(executor.map(load_stock, stocks), total=len(stocks), desc="  加载价格"))
+
+        # 构建缓存
+        price_cache = {}
+        for stock, open_prices, close_prices in results:
+            if open_prices is None:
+                continue
+
+            for date in dates:
+                if date not in price_cache:
+                    price_cache[date] = {}
+
+                open_val = open_prices.get(date)
+                close_val = close_prices.get(date) if close_prices else None
+
+                if open_val is not None or close_val is not None:
+                    price_cache[date][stock.lower()] = {
+                        'open': open_val if open_val else np.nan,
+                        'close': close_val if close_val else np.nan
+                    }
+
+        self.logger.info(f"QLib 价格缓存: {len(price_cache)} 个交易日")
+        return price_cache
+
+    def _neutralize_factor(self, factor_data: pd.DataFrame, factor_name: str) -> pd.DataFrame:
+        """
+        因子中性化（行业+市值）
+
+        Parameters
+        ----------
+        factor_data : pd.DataFrame
+            因子数据
+        factor_name : str
+            因子名称
+
+        Returns
+        -------
+        pd.DataFrame
+            中性化后的因子数据（用中性化因子值替换原因子列）
+        """
+        import polars as pl
+        from factor_production import DataManager
+
+        # 1. 转换为 Polars
+        # 因子数据格式: index=stock, columns=['date', factor_name, ...]
+        df_reset = factor_data.reset_index()
+        df_pl = pl.from_pandas(df_reset)
+
+        # 2. 加载流通市值
+        self.logger.info("  加载流通市值数据...")
+        dm = DataManager()
+        stocks = df_pl['stock'].unique().to_list()
+        start = df_pl['date'].min()
+        end = df_pl['date'].max()
+
+        df_cap = dm.load(stocks, start, end, ['$circ_mv'])
+
+        if df_cap.is_empty():
+            self.logger.warning("  流通市值数据为空，跳过中性化")
+            return factor_data
+
+        # 重命名列以匹配
+        df_cap = df_cap.select(['stock', 'date', 'circ_mv'])
+
+        # 统一日期格式为字符串
+        df_pl = df_pl.with_columns(pl.col('date').cast(pl.Utf8).alias('date'))
+        df_cap = df_cap.with_columns(pl.col('date').cast(pl.Utf8).alias('date'))
+
+        # 3. 合并市值
+        df_merged = df_pl.join(df_cap, on=['stock', 'date'], how='left')
+
+        self.logger.info(f"  合并后: {len(df_merged)} 行, 市值有效: {df_merged['circ_mv'].drop_nulls().len()}")
+
+        # 4. 执行中性化
+        df_neutral = self._neutralizer.neutralize(
+            df_merged,
+            factor_name,
+            market_cap_col='circ_mv',
+            how=self.neutralize_how,
+            standardize=True
+        )
+
+        # 5. 检查中性化结果
+        neutral_col = f'{factor_name}_neutral'
+        if neutral_col not in df_neutral.columns:
+            self.logger.warning("  中性化失败，使用原始因子")
+            return factor_data
+
+        # 6. 用中性化因子替换原因子列
+        df_neutral = df_neutral.with_columns(
+            pl.col(neutral_col).alias(factor_name)
+        )
+
+        # 7. 转回 Pandas 并恢复索引
+        df_pd = df_neutral.to_pandas()
+        df_pd = df_pd.set_index('stock')
+
+        # 确保只保留需要的列
+        cols_to_keep = ['date', factor_name]
+        df_pd = df_pd[cols_to_keep]
+
+        self.logger.info(f"  中性化完成: {len(df_pd)} 行")
+
+        return df_pd
 
     def _load_shibor_data(self, start_date: str, end_date: str) -> pd.DataFrame:
         """
@@ -897,9 +1243,10 @@ class Backtester:
         # Tight layout
         plt.tight_layout()
 
-        # Save plot
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        plot_path = os.path.join(self.save_dir, f"{factor_name}_performance_{timestamp}.png")
+        # Save plot (保存到因子子目录)
+        factor_dir = os.path.join(self.save_dir, factor_name)
+        os.makedirs(factor_dir, exist_ok=True)
+        plot_path = os.path.join(factor_dir, "performance.png")
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         self.logger.info(f"Performance plot saved: {plot_path}")
 
@@ -910,55 +1257,32 @@ class Backtester:
         return plot_path
 
     def _save_results(self, results: Dict, factor_name: str):
-        """保存回测结果（保存前自动清理相同因子的旧文件）"""
-        # 清理相同因子名的旧文件（包括CSV和PNG）
-        import glob
-
-        patterns = [
-            f'{factor_name}_values_*.csv',
-            f'{factor_name}_trades_*.csv',
-            f'{factor_name}_metrics_*.csv',
-            f'{factor_name}_performance_*.png'
-        ]
-
-        old_files = []
-        for pattern in patterns:
-            old_files.extend(glob.glob(os.path.join(self.save_dir, pattern)))
-
-        if old_files:
-            self.logger.info(f"\n发现 {len(old_files)} 个旧的 {factor_name} 回测文件，正在清理...")
-            for old_file in old_files:
-                try:
-                    file_size = os.path.getsize(old_file) / (1024 * 1024)  # MB
-                    os.remove(old_file)
-                    self.logger.info(f"  ✓ 已删除: {os.path.basename(old_file)} ({file_size:.2f} MB)")
-                except Exception as e:
-                    self.logger.warning(f"  ✗ 删除失败: {os.path.basename(old_file)} - {e}")
-
-        # 生成新的时间戳
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        """保存回测结果（每个因子一个子目录）"""
+        # 创建因子专属目录
+        factor_dir = os.path.join(self.save_dir, factor_name)
+        os.makedirs(factor_dir, exist_ok=True)
 
         # 保存净值曲线
         results['portfolio_values'].to_csv(
-            os.path.join(self.save_dir, f"{factor_name}_values_{timestamp}.csv"),
+            os.path.join(factor_dir, "values.csv"),
             index=False
         )
 
         # 保存交易记录
         if len(results['trades']) > 0:
             results['trades'].to_csv(
-                os.path.join(self.save_dir, f"{factor_name}_trades_{timestamp}.csv"),
+                os.path.join(factor_dir, "trades.csv"),
                 index=False
             )
 
         # 保存业绩指标
         metrics_df = pd.DataFrame([results['metrics']])
         metrics_df.to_csv(
-            os.path.join(self.save_dir, f"{factor_name}_metrics_{timestamp}.csv"),
+            os.path.join(factor_dir, "metrics.csv"),
             index=False
         )
 
-        self.logger.info(f"\n结果已保存到: {self.save_dir}")
+        self.logger.info(f"\n结果已保存到: {factor_dir}")
 
 
 if __name__ == "__main__":

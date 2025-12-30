@@ -71,8 +71,8 @@ class FactorEngine:
         print(f"字段: {fields}")
         print(f"{'='*60}")
 
-        # 1. 加载数据
-        df = self.dm.load(stocks, start, end, fields)
+        # 1. 加载数据（后复权）
+        df = self.dm.load(stocks, start, end, fields, adjust=True)
 
         if df.is_empty():
             print("错误: 数据加载失败")

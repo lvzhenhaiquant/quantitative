@@ -84,6 +84,8 @@ class BacktestEngine:
             benchmark: str = 'sh000852',
             start_date: str = '2021-01-01',
             universe: str = 'csi1000',
+            rebalance: Literal['daily', 'weekly', 'monthly'] = 'monthly',
+            neutralize: bool = False,
             show_plot: bool = True) -> Dict:
         """
         运行回测
@@ -101,6 +103,7 @@ class BacktestEngine:
             benchmark: 基准指数代码 (默认中证1000)
             start_date: 回测起始日期
             universe: 股票池名称 (默认 csi1000, 用于避免未来函数)
+            rebalance: 调仓频率 (daily/weekly/monthly)
             show_plot: 是否显示图表
 
         Returns:
@@ -113,9 +116,11 @@ class BacktestEngine:
         print(f"  方向: {'选最小' if direction == 'min' else '选最大'}")
         print(f"  权重: {weight}")
         print(f"  选股: {n_stocks} 只")
+        print(f"  调仓: {rebalance}")
         print(f"  基准: {benchmark}")
         print(f"  股票池: {universe}")
         print(f"  起始: {start_date}")
+        print(f"  中性化: {'开启 (申万2级+流通市值)' if neutralize else '关闭'}")
         print("=" * 70)
 
         # 1. 加载因子数据
@@ -131,7 +136,9 @@ class BacktestEngine:
             n_stocks=n_stocks,
             benchmark=benchmark,
             start_date=start_date,
-            universe=universe
+            universe=universe,
+            rebalance=rebalance,
+            neutralize=neutralize
         )
 
         # 3. 运行回测
@@ -191,7 +198,9 @@ class BacktestEngine:
                       n_stocks: int,
                       benchmark: str,
                       start_date: str,
-                      universe: str) -> Dict:
+                      universe: str,
+                      rebalance: str = 'monthly',
+                      neutralize: bool = False) -> Dict:
         """构建回测配置"""
         config = self.DEFAULT_CONFIG.copy()
 
@@ -213,9 +222,7 @@ class BacktestEngine:
         }
 
         # 调仓频率
-        config['rebalance'] = {
-            'freq': 'weekly'
-        }
+        config['rebalance'] = {'freq': rebalance}
 
         # 基准
         config['benchmark'] = {
@@ -230,6 +237,21 @@ class BacktestEngine:
         config['universe'] = {
             'name': universe,
             'filter': True  # 是否按日期筛选成分股
+        }
+
+        # 股票过滤配置（ST、停牌、涨跌停）
+        config['stock_filter'] = {
+            'exclude_st': True,
+            'exclude_suspend': True,
+            'exclude_limit': True,
+        }
+
+        # 中性化配置
+        config['neutralize'] = {
+            'enabled': neutralize,
+            'how': ['industry', 'market_cap'],
+            'industry_level': 2,  # 申万2级行业
+            'market_cap_col': 'circ_mv',  # 流通市值
         }
 
         return config
@@ -330,12 +352,11 @@ class BacktestEngine:
         plt.xticks(rotation=45)
         plt.tight_layout()
 
-        # 保存
-        save_dir = Path(self.DEFAULT_CONFIG['output']['save_dir'])
+        # 保存到因子子目录
+        save_dir = Path(self.DEFAULT_CONFIG['output']['save_dir']) / factor
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"{factor}_{direction}_{weight}_{n_stocks}_{timestamp}.png"
+        filename = f"{direction}_{weight}_{n_stocks}.png"
         save_path = save_dir / filename
 
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
