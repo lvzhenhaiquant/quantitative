@@ -1,56 +1,37 @@
-# 回测配置文件
-
 backtest:
-  # ========== 基本配置 ==========
-  initial_cash: 10000000  # 初始资金: 1000万
-  backtest_start_date: "2021-12-17"  # 回测起始日期（留1年给协方差计算）
-
-  # ========== 交易成本 ==========
-  transaction:
-    commission_rate: 0.0003  # 手续费率: 万3
-    min_commission: 5        # 最小手续费: 5元
-    stamp_tax: 0.001         # 印花税: 千1 (仅卖出)
-    slippage: 0.001          # 滑点: 千1
-
-  # ========== 选股配置 ==========
-  selection:
-    method: "top_n"          # 选股方法: top_n (TopN选股) / quantile (分位数)
-    n_stocks: 50             # 选股数量 (method=top_n时有效)
-    quantile: 0.2            # 分位数阈值 (method=quantile时有效)
-    ascending: true          # true=因子值从小到大排序 (低波动), false=从大到小
-
-  # ========== 权重配置 ==========
-  weighting:
-    method: "max_sharpe"     # 权重方法: equal (等权) / min_vol (最小方差) / max_sharpe (最大夏普) / factor_weighted (因子加权)
-    lookback_days: 252       # 回看天数（用于min_vol/max_sharpe计算协方差）
-    max_weight: 0.05         # 单只股票最大权重（min_vol/max_sharpe有效）
-    min_weight: 0.0          # 单只股票最小权重
-    risk_free_rate: 0.02     # 无风险利率（max_sharpe有效，当use_dynamic_rf=false时使用）
-    use_dynamic_rf: true     # 是否使用动态SHIBOR作为无风险利率（避免未来函数）
-
-  # ========== 调仓频率 ==========
-  rebalance:
-    freq: "monthly"          # 调仓频率: daily / weekly / monthly
-
-  # ========== 风险控制 ==========
-  risk:
-    max_position: 0.05       # 单只股票最大仓位: 5%
-    min_position: 0.01       # 单只股票最小仓位: 1%
-    max_turnover: 1.0        # 单次最大换手率: 100%
-    stop_loss: null          # 止损线 (null=不设置, -0.1=10%止损)
-
-  # ========== 基准配置 ==========
+  backtest_start_date: '2021-12-17'
   benchmark:
-    code: "sh000852"         # 基准指数代码
-    name: "中证1000"
-
-  # ========== 输出配置 ==========
-  output:
-    save_trades: true        # 是否保存交易记录
-    save_positions: true     # 是否保存持仓记录
-    save_dir: "/home/zhenhai1/quantitative/backtest/results"
-
-  # ========== 交易时机配置 ==========
+    code: sh000852
+    name: 中证1000
   execution:
-    trade_at_open: true      # true=开盘价交易 (更符合逻辑), false=收盘价交易
-    allow_short: false       # 是否允许做空
+    allow_short: false
+    trade_at_open: true
+  initial_cash: 10000000
+  output:
+    save_dir: /home/zhenhai1/quantitative/backtest/results
+    save_positions: true
+    save_trades: true
+  rebalance:
+    freq: monthly
+  risk:
+    max_position: 0.05
+    max_turnover: 1.0
+    min_position: 0.01
+    stop_loss: null
+  selection:
+    ascending: true
+    method: top_n
+    n_stocks: 50
+    quantile: 0.2
+  transaction:
+    commission_rate: 0.0003
+    min_commission: 5
+    slippage: 0.001
+    stamp_tax: 0.001
+  weighting:
+    lookback_days: 252
+    max_weight: 0.05
+    method: max_sharpe
+    min_weight: 0.0
+    risk_free_rate: 0.02
+    use_dynamic_rf: true

@@ -19,6 +19,7 @@
     volatility     - 历史波动率 (推荐 direction=min)
     idio_vol       - 特质波动率 (推荐 direction=min)
     downside_vol   - 下行波动率 (推荐 direction=min)
+    history_sigma  - 半衰加权特质波动率 (推荐 direction=min)
     turnover_mean  - 平均换手率 (推荐 direction=min)
     turnover_bias  - 换手率偏离度
     turnover_vol   - 换手率波动率 (推荐 direction=min)
@@ -79,6 +80,27 @@ FACTOR_MAP = {
         'fields': ['$turnover_rate_f'],
         'kwargs': {'window': 20}
     },
+    'turnover_ratio': {
+        'func': 'calc_turnover_ratio',
+        'fields': ['$turnover_rate_f'],
+        'kwargs': {'short_window': 10, 'long_window': 120}
+    },
+    'turnover_ma5': {
+        'func': 'calc_turnover_ma5',
+        'fields': ['$turnover_rate_f'],
+        'kwargs': {'window': 5}
+    },
+    # 成交额因子
+    'amount_std': {
+        'func': 'calc_amount_std',
+        'fields': ['$amount'],
+        'kwargs': {'window': 20}
+    },
+    'amount_ma': {
+        'func': 'calc_amount_ma',
+        'fields': ['$amount'],
+        'kwargs': {'window': 6}
+    },
     # 估值因子 (需要财报数据)
     'peg_ratio': {
         'func': 'calc_peg_ratio',
@@ -86,10 +108,37 @@ FACTOR_MAP = {
         'financial_fields': ['netprofit_yoy'],
         'kwargs': {}
     },
+    # 历史波动率因子 (需要基准数据)
+    'history_sigma': {
+        'func': 'calc_history_sigma',
+        'fields': ['$close'],
+        'benchmark': 'sh000300',  # 沪深300作为基准
+        'kwargs': {'window': 250, 'half_life': 63}
+    },
+    # 收益率方差因子
+    'return_var': {
+        'func': 'calc_return_var',
+        'fields': ['$close'],
+        'kwargs': {'window': 121}
+    },
+    # 营业外收支占比因子 (纯财报因子)
+    'non_oper_ratio': {
+        'func': 'calc_non_oper_ratio',
+        'fields': [],  # 不需要日频价格数据
+        'financial_fields': ['non_oper_income', 'non_oper_exp', 'total_profit'],
+        'kwargs': {}
+    },
+    # 资产负债率同比变化因子 (独立计算，直接读取原始年报)
+    'debt_ratio_yoy': {
+        'func': 'calc_debt_ratio_yoy',
+        'fields': [],
+        'standalone': True,  # 独立计算，不需要 load_financial
+        'kwargs': {'start': '2020-01-01', 'end': '2025-12-17'}
+    },
 }
 
 
-def calc_factor(factor_name: str):
+def calc_factor(factor_name: str, universe: str = 'csi1000'):
     """计算因子"""
     from factor_production import DataManager, FactorEngine
     from factor_production import factors as factor_funcs
@@ -104,6 +153,8 @@ def calc_factor(factor_name: str):
     fields = config['fields']
     kwargs = config.get('kwargs', {})
     financial_fields = config.get('financial_fields', [])
+    benchmark_code = config.get('benchmark', None)
+    standalone = config.get('standalone', False)
 
     func = getattr(factor_funcs, func_name)
 
@@ -112,33 +163,95 @@ def calc_factor(factor_name: str):
     engine = FactorEngine(dm, cache_dir='/home/zhenhai1/quantitative/factor_production/cache')
 
     # 配置参数
-    stocks = 'csi1000'
+    stocks = universe
     start = '2020-01-01'
-    end = '2025-12-17'
+    from datetime import datetime
+    end = datetime.now().strftime('%Y-%m-%d')
+
+    # 独立计算的因子（直接调用函数，不需要额外数据加载）
+    if standalone:
+        print(f"\n独立计算因子: {factor_name}")
+        result = func(**kwargs)
+
+        factor_col = factor_name
+        if factor_col in result.columns:
+            factor_values = result[factor_col].drop_nulls().drop_nans()
+            print(f"\n因子统计:")
+            print(f"  有效值: {len(factor_values)}")
+            if len(factor_values) > 0:
+                print(f"  均值: {factor_values.mean():.4f}")
+                print(f"  标准差: {factor_values.std():.4f}")
+                print(f"  最小值: {factor_values.min():.4f}")
+                print(f"  最大值: {factor_values.max():.4f}")
+
+            save_path = engine._save(result, factor_col, start, end)
+            print(f"\n已保存到: {save_path}")
+
+        print(f"\n因子 {factor_name} 计算完成!")
+        return
+
+    # 检查是否需要基准数据
+    elif benchmark_code:
+        print(f"\n此因子需要基准数据: {benchmark_code}")
+
+        # 加载个股数据
+        df_price = dm.load(stocks, start, end, fields)
+
+        # 加载基准数据
+        df_benchmark = dm.load_benchmark(benchmark_code, start, end)
+
+        if df_benchmark.is_empty():
+            print(f"\n错误: 基准数据为空 ({benchmark_code})")
+            return
+
+        print(f"基准数据: {len(df_benchmark)} 行")
+
+        # 计算因子
+        result = func(df_price, df_benchmark, **kwargs)
+
+        # 保存结果
+        factor_col = factor_name
+        if factor_col in result.columns:
+            # 统计 (同时过滤 null 和 NaN)
+            factor_values = result[factor_col].drop_nulls().drop_nans()
+            print(f"\n因子统计:")
+            print(f"  有效值: {len(factor_values)}")
+            if len(factor_values) > 0:
+                print(f"  均值: {factor_values.mean():.4f}")
+                print(f"  标准差: {factor_values.std():.4f}")
+                print(f"  最小值: {factor_values.min():.4f}")
+                print(f"  最大值: {factor_values.max():.4f}")
+
+            # 保存
+            save_path = engine._save(result, factor_col, start, end)
+            print(f"\n已保存到: {save_path}")
 
     # 检查是否需要财报数据
-    if financial_fields:
+    elif financial_fields:
         print(f"\n此因子需要财报数据: {financial_fields}")
-
-        # 加载日频数据
-        df_price = dm.load(stocks, start, end, fields)
 
         # 加载财报数据
         df_financial = dm.load_financial(stocks, start, end, financial_fields)
 
         if df_financial.is_empty():
             print("\n错误: 财报数据为空，请先下载财报数据:")
-            print("  python factor_production/data/download_financial.py")
+            print("  python factor_production/data/download_financial.py --fields " + ",".join(financial_fields))
             return
 
-        # 计算因子 (传入两个 DataFrame)
-        result = func(df_price, df_financial, **kwargs)
+        # 根据是否需要日频价格数据选择调用方式
+        if fields:
+            # 需要日频价格数据 (如 peg_ratio 需要 $pe_ttm)
+            df_price = dm.load(stocks, start, end, fields)
+            result = func(df_price, df_financial, **kwargs)
+        else:
+            # 纯财报因子，不需要日频价格数据
+            result = func(df_financial, **kwargs)
 
         # 保存结果
         factor_col = factor_name
         if factor_col in result.columns:
-            # 统计
-            factor_values = result[factor_col].drop_nulls()
+            # 统计 (同时过滤 null 和 NaN)
+            factor_values = result[factor_col].drop_nulls().drop_nans()
             print(f"\n因子统计:")
             print(f"  有效值: {len(factor_values)}")
             if len(factor_values) > 0:
@@ -164,7 +277,9 @@ def calc_factor(factor_name: str):
     print(f"\n因子 {factor_name} 计算完成!")
 
 
-def run_backtest(factor: str, direction: str, weight: str, n_stocks: int):
+def run_backtest(factor: str, direction: str, weight: str, n_stocks: int,
+                 universe: str = 'csi1000', rebalance: str = 'monthly',
+                 neutralize: bool = False):
     """运行回测"""
     from backtest import BacktestEngine
 
@@ -173,7 +288,10 @@ def run_backtest(factor: str, direction: str, weight: str, n_stocks: int):
         factor=factor,
         direction=direction,
         weight=weight,
-        n_stocks=n_stocks
+        n_stocks=n_stocks,
+        universe=universe,
+        rebalance=rebalance,
+        neutralize=neutralize
     )
 
     return result
@@ -200,11 +318,12 @@ def main():
   python run_backtest.py -f volatility -d min                    # 低波动等权
   python run_backtest.py -f volatility -d min -w max_sharpe      # 低波动最大夏普
   python run_backtest.py -f turnover_mean -d min -n 50           # 低换手50只
+  python run_backtest.py -f history_sigma -d min -N              # 开启中性化
 
   # 查看可用因子
   python run_backtest.py --list
 
-可用因子: volatility, idio_vol, downside_vol, turnover_mean, turnover_bias, turnover_vol, peg_ratio
+可用因子: volatility, idio_vol, history_sigma, turnover_mean, turnover_ratio, amount_std, return_var
 详细文档: docs/使用指南.md
         """
     )
@@ -212,6 +331,8 @@ def main():
     # 计算因子
     parser.add_argument('--calc', type=str, metavar='FACTOR',
                        help='计算指定因子 (volatility/turnover_mean/...)')
+    parser.add_argument('--universe', '-u', type=str, default='csi1000',
+                       help='股票池: csi1000/csi500/csi300/csiall (默认: csi1000)')
 
     # 回测参数
     parser.add_argument('--factor', '-f', type=str, metavar='NAME',
@@ -224,6 +345,11 @@ def main():
                        help='权重方法: equal/max_sharpe/min_vol (默认: equal)')
     parser.add_argument('--n', type=int, default=30, metavar='NUM',
                        help='选股数量 (默认: 30)')
+    parser.add_argument('--rebalance', '-r', type=str, default='monthly',
+                       choices=['daily', 'weekly', 'monthly'],
+                       help='调仓频率: daily/weekly/monthly (默认: monthly)')
+    parser.add_argument('--neutralize', '-N', action='store_true',
+                       help='开启因子中性化 (申万2级行业 + 流通市值)')
 
     # 其他
     parser.add_argument('--list', action='store_true',
@@ -232,11 +358,11 @@ def main():
     args = parser.parse_args()
 
     if args.calc:
-        calc_factor(args.calc)
+        calc_factor(args.calc, universe=args.universe)
     elif args.list:
         list_factors()
     elif args.factor:
-        run_backtest(args.factor, args.direction, args.weight, args.n)
+        run_backtest(args.factor, args.direction, args.weight, args.n, args.universe, args.rebalance, args.neutralize)
     else:
         parser.print_help()
 

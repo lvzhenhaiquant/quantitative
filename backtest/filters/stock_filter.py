@@ -162,12 +162,16 @@ class StockFilter:
         检查是否为科创板或北交所股票
 
         科创板: 688xxx (上海)
-        北交所: 4xxxxx, 8xxxxx
+        北交所: 43xxxx, 83xxxx, 87xxxx
         """
         stock = self._normalize_stock(stock)
         code = stock.split('.')[0]
 
-        if code.startswith('68') or code.startswith('4') or code.startswith('8'):
+        # 科创板: 688xxx
+        if code.startswith('688'):
+            return True
+        # 北交所: 43xxxx, 83xxxx, 87xxxx
+        if code.startswith('43') or code.startswith('83') or code.startswith('87'):
             return True
         return False
 

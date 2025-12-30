@@ -69,3 +69,22 @@ config_local.yaml
 
 # 检查点文件
 *checkpoint*.csv
+
+# 隐藏的因子文件 (只保留 amount_ma)
+factor_production/factors/volatility.py
+factor_production/factors/idio_vol.py
+factor_production/factors/downside_vol.py
+factor_production/factors/history_sigma.py
+factor_production/factors/return_var.py
+factor_production/factors/turnover_mean.py
+factor_production/factors/turnover_bias.py
+factor_production/factors/turnover_vol.py
+factor_production/factors/turnover_ratio.py
+factor_production/factors/turnover_ma5.py
+factor_production/factors/amount_std.py
+factor_production/factors/peg_ratio.py
+factor_production/factors/non_oper_ratio.py
+factor_production/factors/debt_ratio_yoy.py
+factor_production/neutralize.py
+factor_production/export_to_qlib.py
+backtest/ic_analysis.py
