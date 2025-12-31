@@ -43,6 +43,7 @@ class DownloadDataFromTushare_Baostock:
         self.save_dir_updown_limit = './download_data/updown_limit'
         self.save_dir_moneyflow = './download_data/moneyflow'
         self.save_dir_index_weight = './download_data/index_weight'
+        self.save_dir_shenwan_constituent_stock = './download_data/shenwan_constituent_stock'
 
         self.index_mapping = {
             "上证50": "000016.SH",
@@ -2768,7 +2769,7 @@ class DownloadDataFromTushare_Baostock:
         begin_all_str = min(old_start_str, old_end_str, start_date_str, end_date_str)  # 所有日期首位相连或者重叠后的最边际日期
         end_all_str = max(old_start_str, old_end_str, start_date_str, end_date_str)
         for missing_start_str, missing_end_str in missing_start_end_list:
-            tmp_df = self._get_shenwan_daily_df(start_date_str, end_date_str)
+            tmp_df = self._get_shenwan_daily_df(missing_start_str, missing_end_str)
             if len(tmp_df) == 0:
                 print("获取日线数据为空{start_date_str} - {end_date_str}")
 
@@ -2913,4 +2914,125 @@ class DownloadDataFromTushare_Baostock:
         return adj_df
         
 
+    def download_tushare_shenwan_constituent_stock(self, start_date_str, end_date_str):
+        file_name_constituent_stock = os.path.join(self.save_dir_shenwan, f'download_shenwan_constituent_stock_df_{start_date_str}_{end_date_str}.parquet')
+        constituent_stock_exists = os.path.exists(file_name_constituent_stock)
+        if constituent_stock_exists :
+            print(f"申万指数成分股数据已存在，无需更新")
+            return
+        # 日期子集跳出
+        file_name_constituent_stock_prefix = 'download_shenwan_constituent_stock_df_'
+        file_name_constituent_stock_exist, temp1 = self._utils_read_matched_csv_by_prefix(self.save_dir_shenwan,file_name_constituent_stock_prefix)
+        temp1 = pd.DataFrame()
+        if file_name_constituent_stock_exist:
+            print(f"{file_name_constituent_stock_exist}文件已存在，请使用增量下载")
+            return
+        # 1 获取全部股票列表
+        stock_basic_df = self._get_stock_basic_df()
+        if len(stock_basic_df) == 0:
+            print("获取日线数据为空，退出!")
+            return
 
+        # 2 获取所有需查询的股票
+        all_stocks = stock_basic_df['ts_code'].dropna().unique().tolist()
+        if len(all_stocks) == 0:
+            print("无有效成分股数据，程序终止")
+            return
+        def get_constituent_stock_df():  # 为了多线程处理，改成函数形式
+            if os.path.exists(file_name_constituent_stock):
+                constituent_stock_df = pd.read_parquet(file_name_constituent_stock, engine='pyarrow')
+                if len(constituent_stock_df) == 0:
+                    print("本地指数成分股数据为空，退出!")
+            else:
+                constituent_stock_df = self._get_shenwan_constituent_stock(all_stocks)
+                constituent_stock_df.to_parquet(file_name_constituent_stock, index=False, engine='pyarrow')
+            return constituent_stock_df 
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            # 提交任务
+            constituent_stock_df = executor.submit(get_constituent_stock_df)
+            # 获取结果
+            constituent_stock_df = constituent_stock_df.result()
+        grouped = constituent_stock_df.groupby('l2_code')
+        for l2_code, group in grouped:
+            code_parts = l2_code.split('.')
+            l2_code=f"{code_parts[1]}{code_parts[0]}"
+            group.to_parquet(os.path.join(self.save_dir_shenwan_constituent_stock, f'{l2_code}.parquet'), index=False, engine='pyarrow')
+        print("申万成分股下载完成")
+    
+    def updates_tushare_shenwan_constituent_stock(self, start_date_str, end_date_str):
+        file_name_constituent_stock = os.path.join(self.save_dir_shenwan, f'download_shenwan_constituent_stock_df_{start_date_str}_{end_date_str}.parquet')
+        constituent_stock_exists = os.path.exists(file_name_constituent_stock)
+        if constituent_stock_exists :
+            print(f"申万指数成分股数据已存在，无需更新")
+            # return
+        
+        file_name_constituent_stock_prefix = 'download_shenwan_constituent_stock_df_'
+        file_name_constituent_stock_exist, file_name_constituent_stock_df = self._utils_read_matched_csv_by_prefix(self.save_dir_shenwan,file_name_constituent_stock_prefix)
+        old_start_str, old_end_str = self._utils_extract_date_from_filename(file_name_constituent_stock_exist)  
+        if file_name_constituent_stock_exist:
+            if (end_date_str == old_start_str and start_date_str < end_date_str) or (start_date_str == old_end_str and end_date_str > start_date_str):
+                print("下载日期正确")
+            else:
+                print("[ updates_tushare_shenwan_constituent_stock ]下载日期设置错误")
+                # return
+        old_stock_list  = file_name_constituent_stock_df['ts_code'].dropna().unique().tolist()
+        stock_basic_df = self._get_stock_basic_df()
+        all_stocks = stock_basic_df['ts_code'].dropna().unique().tolist()
+        new_stock_list = list(set(all_stocks) - set(old_stock_list))
+        if len(new_stock_list)>0:
+            print(f"新增{len(new_stock_list)}只股票")
+            constituent_stock_df = self._get_shenwan_constituent_stock(new_stock_list)
+            file_name_constituent_stock_df = pd.concat([file_name_constituent_stock_df, constituent_stock_df], axis=0)
+        else:
+            print("申万成分股无新增股票")
+        file_name_constituent_stock_df.to_parquet(file_name_constituent_stock, index=False, engine='pyarrow')
+        grouped = file_name_constituent_stock_df.groupby('l2_code')
+        for l2_code, group in grouped:
+            code_parts = l2_code.split('.')
+            l2_code=f"{code_parts[1]}{code_parts[0]}"
+            group.to_parquet(os.path.join(self.save_dir_shenwan_constituent_stock, f'{l2_code}.parquet'), index=False, engine='pyarrow')
+        print("申万成分股更新完成")
+            
+
+
+        
+
+
+
+    def _get_shenwan_constituent_stock(self, stock_list):
+        constituent_stock_all = []
+        constituent_stock_df = pd.DataFrame()
+        max_retry = self.MAX_RETRY  # 最大重试次数
+        for i, stock_code in enumerate(tqdm(stock_list, desc='获取申万指数成分股数据'), 1):
+            retry_count = 0
+            success = False
+            tmp = None
+            retry_delay = 1  # 每只股票重置初始重试间隔为1秒
+            while retry_count < max_retry and not success:
+                try:
+                    tmp = self.pro.index_member_all(ts_code=stock_code)
+                    success = True  # 成功获取，退出重试循环
+                    if not tmp.empty:
+                        constituent_stock_all.append(tmp)
+                    else:
+                        print(f"_get_constituent_stock 未查询到股票{stock_code}数据")
+                # 只捕获网络相关异常，非网络异常直接跳过重试
+                except (NameResolutionError, MaxRetryError, ConnectionError,TimeoutError,ConnectionResetError,requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count < max_retry:
+                        print(f"_get_constituent_stock 获取{stock_code}数据失败（网络错误）：{str(e)[:50]}... 第{retry_count}次重试，等待{retry_delay}秒")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避，间隔翻倍
+                    else:
+                        print(f"_get_constituent_stock 获取{stock_code}数据失败：{str(e)[:50]}... 已重试{max_retry}次，跳过该股票")
+                # 非网络异常：直接终止重试，跳过该股票
+                except Exception as e:
+                    print(f"_get_constituent_stock 获取个股资金流向失败（{stock_code}）：{e}，非网络错误，直接跳过")
+                    break  # 跳出while重试循环
+
+        if constituent_stock_all:  # 合并复权因子（过滤无效数据）
+            constituent_stock_all = [df for df in constituent_stock_all if not df.empty]
+            constituent_stock_df = pd.concat(constituent_stock_all, ignore_index=True)
+            constituent_stock_df = constituent_stock_df.dropna(subset=['l2_code', 'ts_code'])  # 过滤NaN
+            print(f"共获取{len(constituent_stock_df)}条个股资金流向数据")
+        return constituent_stock_df
