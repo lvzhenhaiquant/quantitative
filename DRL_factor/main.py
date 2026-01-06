@@ -1,0 +1,51 @@
+import numpy as np
+
+from RlEnv import FactorRLEnv
+from FactorToken import FactorTokenLibrary, RPNEncoder
+from PPOAgent import PPOAgent
+import utils
+
+if __name__ == "__main__":
+    token_lib = FactorTokenLibrary()
+    env = FactorRLEnv(token_lib)
+    encoder = RPNEncoder(token_lib)
+    agent = PPOAgent(env, learning_rate=3e-4, batch_size=256)
+
+    # 用于记录训练数据
+    actor_losses = []
+    critic_losses = []
+    entropies = []
+    rewards = []
+    episodes = []
+    total_steps = 0
+    train_count=0
+    
+    # 训练配置
+    num_steps = 1  # 总训练epochs
+    collect_days = 1454  # 每次收集的步数,总共回测的天数
+    
+    while total_steps < num_steps:
+        DRL_env = env.reset()
+        observation = DRL_env.observation
+        step_count = 0
+        while step_count < collect_days: #总天数
+            reward = agent.collect_experience_for_day(observation)#每天执行
+            rewards.append(reward)
+            if step_count % 5 == 0: # 训练代理
+                loss_info = agent.learn()
+                # 记录训练信息
+                actor_losses.append(loss_info['actor_loss'])
+                critic_losses.append(loss_info['critic_loss'])
+                entropies.append(loss_info['entropy'])
+                train_count += 1
+                utils.show_loss_info(actor_losses, critic_losses, entropies,rewards)
+                print(f"days进度：{step_count}/{collect_days},总执行进度：{total_steps}/{num_steps},训练轮次：{train_count}")
+            step_count += 1
+        total_steps += collect_days
+
+
+
+        
+    
+
+

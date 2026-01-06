@@ -2771,7 +2771,7 @@ class DownloadDataFromTushare_Baostock:
         for missing_start_str, missing_end_str in missing_start_end_list:
             tmp_df = self._get_shenwan_daily_df(missing_start_str, missing_end_str)
             if len(tmp_df) == 0:
-                print("获取日线数据为空{start_date_str} - {end_date_str}")
+                print(f"获取日线数据为空{start_date_str} - {end_date_str}")
 
             file_name_shenwan_daily_df = pd.concat(
                 [file_name_shenwan_daily_df, tmp_df],  # 先加原始数据，后加新数据
@@ -2964,7 +2964,7 @@ class DownloadDataFromTushare_Baostock:
         constituent_stock_exists = os.path.exists(file_name_constituent_stock)
         if constituent_stock_exists :
             print(f"申万指数成分股数据已存在，无需更新")
-            # return
+            return
         
         file_name_constituent_stock_prefix = 'download_shenwan_constituent_stock_df_'
         file_name_constituent_stock_exist, file_name_constituent_stock_df = self._utils_read_matched_csv_by_prefix(self.save_dir_shenwan,file_name_constituent_stock_prefix)
@@ -2974,7 +2974,18 @@ class DownloadDataFromTushare_Baostock:
                 print("下载日期正确")
             else:
                 print("[ updates_tushare_shenwan_constituent_stock ]下载日期设置错误")
-                # return
+                return
+        #------------
+        missing_start_end_list = self._utils_get_missing_date_ranges(old_start_str, old_end_str, start_date_str, end_date_str)
+        begin_all_str = min(old_start_str, old_end_str, start_date_str, end_date_str)  # 所有日期首位相连或者重叠后的最边际日期
+        end_all_str = max(old_start_str, old_end_str, start_date_str, end_date_str)
+        for missing_start_str, missing_end_str in missing_start_end_list:
+            tmp_df = self._get_shenwan_daily_df(missing_start_str, missing_end_str)
+            if len(tmp_df) == 0:
+                print(f"获取constituent_stock数据为空{start_date_str} - {end_date_str}")
+        #-----------
+
+        
         old_stock_list  = file_name_constituent_stock_df['ts_code'].dropna().unique().tolist()
         stock_basic_df = self._get_stock_basic_df()
         all_stocks = stock_basic_df['ts_code'].dropna().unique().tolist()
@@ -2985,7 +2996,7 @@ class DownloadDataFromTushare_Baostock:
             file_name_constituent_stock_df = pd.concat([file_name_constituent_stock_df, constituent_stock_df], axis=0)
         else:
             print("申万成分股无新增股票")
-        file_name_constituent_stock_df.to_parquet(file_name_constituent_stock, index=False, engine='pyarrow')
+        self._to_new_csv_and_delete_old(file_name_constituent_stock_exist, file_name_constituent_stock_df, begin_all_str, end_all_str,self.save_dir_shenwan)
         grouped = file_name_constituent_stock_df.groupby('l2_code')
         for l2_code, group in grouped:
             code_parts = l2_code.split('.')
