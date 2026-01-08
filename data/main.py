@@ -12,15 +12,14 @@ import time
 # 能够直接转换给qlib的股票，格式为SH000000（除了）
 
 if __name__ == '__main__':
-    start_date_str = '20150101'  # 过去5年：从2019年12月开始
-    end_date_str = '20251230'    # 到2024年12月（今天）
+    start_date_str = '20260106'  # 过去5年：从2019年12月开始
+    end_date_str = '20260107'    # 到2024年12月（今天）
 
 
     
     # 二、从Tushare拉取数据到本地处理
-    token = 'a79f284e5d10967dacb6531a3c755a701ca79341ff0c60d59f1fcbf1'
     # 1、初始化
-    DownLoadData = DownLoadData.DownloadDataFromTushare_Baostock(token)
+    DownLoadData = DownLoadData.DownloadDataFromTushare_Baostock()
     # 2、下载"中证1000"基础行情数据
     # DownLoadData.download_tushare_basic(start_date_str,end_date_str)  # 已完成
     # 3、下载"中证1000"财务数据

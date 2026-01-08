@@ -46,7 +46,7 @@ def write_qlib_bin(data: np.ndarray, start_idx: int, filepath: Path):
 def export_factor_to_qlib(
     factor_parquet: str,
     factor_name: str,
-    qlib_path: str = '/home/zhenhai1/quantitative/qlib_data/cn_data'
+    qlib_path: str = '/home/yunbo/project/quantitative/qlib_data/cn_data'
 ):
     """
     将因子 Parquet 导出为 QLib bin 格式

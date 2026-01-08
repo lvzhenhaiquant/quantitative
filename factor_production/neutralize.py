@@ -34,7 +34,7 @@ class FactorNeutralizer:
             industry_level: 行业级别 (1=一级, 2=二级, 3=三级)
         """
         if shenwan_path is None:
-            shenwan_path = '/home/zhenhai1/quantitative/data/download_data/shenwan/download_shenwan_stock_df_L1_L2_L3.csv'
+            shenwan_path = '/home/yunbo/project/quantitative/data/download_data/shenwan/download_shenwan_stock_df_L1_L2_L3.csv'
 
         self.industry_level = industry_level
         self.industry_col = f'l{industry_level}_name'
@@ -238,12 +238,12 @@ def neutralize_factor(
 if __name__ == '__main__':
     # 测试
     import sys
-    sys.path.insert(0, '/home/zhenhai1/quantitative')
+    sys.path.insert(0, '/home/yunbo/project/quantitative')
 
     from factor_production import DataManager
 
     # 加载因子
-    cache_dir = Path('/home/zhenhai1/quantitative/factor_production/cache')
+    cache_dir = Path('/home/yunbo/project/quantitative/factor_production/cache')
     factor_file = list(cache_dir.glob('history_sigma_*.parquet'))[0]
     df = pl.read_parquet(factor_file)
     print(f"加载因子: {len(df)} 行")
