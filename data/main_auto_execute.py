@@ -74,7 +74,7 @@ def download_stock_data(start_date_str, end_date_str):
     try:
         # 二、从Tushare拉取数据到本地处理
         # 1、初始化
-        downloader  = DownLoadData.DownloadDataFromTushare_Baostock(TUSHARE_TOKEN)
+        downloader  = DownLoadData.DownloadDataFromTushare_Baostock()
         # 2、下载"中证1000"基础行情数据
         # downloader.download_tushare_basic(start_date_str,end_date_str)  # 已完成
         # 3、下载"中证1000"财务数据
@@ -123,7 +123,8 @@ def download_stock_data(start_date_str, end_date_str):
         # 10、下载申万分类数据
         downloader.download_tushare_shenwan_classify()
         # 11、增量更新申万指数成分股
-        DownLoadData.updates_tushare_shenwan_constituent_stock(start_date_str, end_date_str)
+        downloader.updates_tushare_shenwan_constituent_stock(start_date_str, end_date_str)
+        
 
         # 四、将数据转为Qlib格式
         # 1 初始化 （配置路径和参数）
@@ -147,13 +148,12 @@ def get_date_str(date_obj):
 
 
 # ===================== 核心配置（可修改） =====================
-TUSHARE_TOKEN = 'a79f284e5d10967dacb6531a3c755a701ca79341ff0c60d59f1fcbf1'
 RUN_HOUR = 18  # 每日运行时间（18点）
 RETRY_INTERVAL = 60  # 失败重试间隔（秒）
 BREAKPOINT_FILE = "stock_data_breakpoint.txt"  # 断点保存文件路径
 MODULE_NAME = "股票数据下载程序（断点续传版）"
-INIT_START_DATE = datetime.datetime.strptime('20251227', '%Y%m%d').date()  # 初始起始日期
-init_end_date = datetime.datetime.strptime('20251228', '%Y%m%d').date()     # 初始结束日期
+INIT_START_DATE = datetime.datetime.strptime('20251231', '%Y%m%d').date()  # 初始起始日期
+init_end_date = datetime.datetime.strptime('20260104', '%Y%m%d').date()     # 初始结束日期
 
 #使用说明
 #如果stock_data_breakpoint.txt文件不存在，程序将从INIT_START_DATE到init_end_date下载数据

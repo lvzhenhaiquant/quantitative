@@ -24,8 +24,9 @@ from urllib3.exceptions import NameResolutionError, MaxRetryError, ConnectionErr
 # 获取中证1000基本面数据
 
 class DownloadDataFromTushare_Baostock:
-    def __init__(self, token):
-        self.token = token
+    def __init__(self):
+        self.token_dir = './config.txt'
+        self.token = self.load_token_from_txt(self.token_dir)
         self.save_dir_download = './download_data/orgin_download_data'
 
         self.save_dir_basic = './download_data/basic'
@@ -44,6 +45,7 @@ class DownloadDataFromTushare_Baostock:
         self.save_dir_moneyflow = './download_data/moneyflow'
         self.save_dir_index_weight = './download_data/index_weight'
         self.save_dir_shenwan_constituent_stock = './download_data/shenwan_constituent_stock'
+
 
         self.index_mapping = {
             "上证50": "000016.SH",
@@ -3047,3 +3049,17 @@ class DownloadDataFromTushare_Baostock:
             constituent_stock_df = constituent_stock_df.dropna(subset=['l2_code', 'ts_code'])  # 过滤NaN
             print(f"共获取{len(constituent_stock_df)}条个股资金流向数据")
         return constituent_stock_df
+    
+
+        # 读取函数
+    def load_token_from_txt(self,file_path='config.txt'):
+            """从txt文件读取token"""
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    token = f.read().strip()
+                if not token:
+                    raise ValueError("Token文件为空")
+                return token
+            except FileNotFoundError:
+                print(f"错误：找不到配置文件 '{file_path}'")
+                raise
