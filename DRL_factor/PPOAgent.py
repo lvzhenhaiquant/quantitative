@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import tensorflow as tf
 from keras  import layers, Model, backend as K
@@ -22,6 +23,7 @@ class PPOAgent:
         self.ent_coef = ent_coef #策略动作的随机性
         self.num_epochs = num_epochs
         self.batch_size = batch_size
+        self.path_prefix="./RL_Data/ppo_model"
         
         # 创建经验回放缓冲区
         self.buffer = ReplayBuffer(batch_size)
@@ -280,6 +282,29 @@ class PPOAgent:
             observation = next_obs
         return reward
         
+
+    def save_model(self):
+        path_prefix = self.path_prefix
+        os.makedirs(os.path.dirname(path_prefix), exist_ok=True)
+        # 保存actor网络权重
+        actor_path = f"{path_prefix}_actor"
+        self.actor.save_weights(actor_path)
+        # 保存critic网络权重
+        critic_path = f"{path_prefix}_critic"
+        self.critic.save_weights(critic_path)
+        print(f"模型已保存到: {critic_path}")
+        
+    
+    def load_model(self, path_prefix):
+        # 加载actor网络权重
+        path_prefix = self.path_prefix
+        actor_path = f"{path_prefix}_actor"
+        self.actor.load_weights(actor_path)
+        # 加载critic网络权重
+        critic_path = f"{path_prefix}_critic"
+        self.critic.load_weights(critic_path)
+        print(f"模型已从: {critic_path} 加载")
+
 
 
 
