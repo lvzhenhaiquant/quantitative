@@ -6,10 +6,9 @@ from PPOAgent import PPOAgent
 import utils
 
 if __name__ == "__main__":
-    token_lib = FactorTokenLibrary()
-    env = FactorRLEnv(token_lib)
-    encoder = RPNEncoder(token_lib)
-    agent = PPOAgent(env, learning_rate=3e-4, batch_size=256)
+
+    env = FactorRLEnv()
+    agent = PPOAgent(env, learning_rate=3e-4, batch_size=32)
 
     # 用于记录训练数据
     actor_losses = []
@@ -27,9 +26,9 @@ if __name__ == "__main__":
     while total_steps < num_steps:
         DRL_env = env.reset()
         observation = DRL_env.observation
-        step_count = 0
+        step_count = 1
         while step_count < collect_days: #总天数
-            reward = agent.collect_experience_for_day(observation)#每天执行
+            reward = agent.collect_experience_for_day(observation) #每天执行
             rewards.append(reward)
             if step_count % 5 == 0: # 训练代理
                 loss_info = agent.learn()
