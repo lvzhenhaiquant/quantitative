@@ -9,6 +9,7 @@ if __name__ == "__main__":
 
     env = FactorRLEnv()
     agent = PPOAgent(env, learning_rate=3e-4, batch_size=32)
+    agent.load_model()
 
     # 用于记录训练数据
     actor_losses = []
@@ -20,7 +21,7 @@ if __name__ == "__main__":
     train_count=0
     
     # 训练配置
-    num_steps = 1  # 总训练epochs
+    num_steps = 500  # 总训练epochs
     collect_days = 1454  # 每次收集的步数,总共回测的天数
     
     while total_steps < num_steps:
@@ -39,6 +40,9 @@ if __name__ == "__main__":
                 train_count += 1
                 utils.show_loss_info(actor_losses, critic_losses, entropies,rewards)
                 print(f"days进度：{step_count}/{collect_days},总执行进度：{total_steps}/{num_steps},训练轮次：{train_count}")
+            # 保存模型
+            if step_count % 100 == 0:
+                agent.save_model()
             step_count += 1
         total_steps += collect_days
 
