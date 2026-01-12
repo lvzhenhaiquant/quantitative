@@ -85,6 +85,22 @@ factor_production/factors/amount_std.py
 factor_production/factors/peg_ratio.py
 factor_production/factors/non_oper_ratio.py
 factor_production/factors/debt_ratio_yoy.py
-factor_production/neutralize.py
+factor_production/factors/daily_std.py
+factor_production/factors/reversal_5d.py
+factor_production/factors/amount_momentum.py
+factor_production/factors/close_strength.py
+factor_production/factors/vol_contraction.py
+factor_production/factors/volume_price_divergence.py
+factor_production/factors/vwap_bias.py
+factor_production/factors/abnormal_turnover.py
+factor_production/factors/return_var_20d.py
+factor_production/factors/hl_ratio_std.py
+factor_production/factors/turnover_sum_ln.py
 factor_production/export_to_qlib.py
 backtest/ic_analysis.py
+
+# 本地因子配置
+local_factors.py
+
+# 数据目录
+data/

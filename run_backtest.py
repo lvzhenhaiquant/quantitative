@@ -15,6 +15,10 @@
     # 4. 列出可用因子
     python run_backtest.py --list
 
+    # 5. IC加权多因子合成
+    python run_backtest.py --combine turnover_ratio,history_sigma,return_var --date 2025-12-31
+    python run_backtest.py --combine turnover_ratio,history_sigma,return_var -n 30  # 选股
+
 可用因子:
     volatility     - 历史波动率 (推荐 direction=min)
     idio_vol       - 特质波动率 (推荐 direction=min)
@@ -47,95 +51,21 @@ import argparse
 #       'kwargs': {}
 #   }
 # }
+# 公开因子
 FACTOR_MAP = {
-    # 波动率因子
-    'volatility': {
-        'func': 'calc_volatility',
-        'fields': ['$close'],
-        'kwargs': {'window': 20}
-    },
-    'idio_vol': {
-        'func': 'calc_idio_vol',
-        'fields': ['$close'],
-        'kwargs': {'window': 20}
-    },
-    'downside_vol': {
-        'func': 'calc_downside_vol',
-        'fields': ['$close'],
-        'kwargs': {'window': 20}
-    },
-    # 换手率因子
-    'turnover_mean': {
-        'func': 'calc_turnover_mean',
-        'fields': ['$turnover_rate_f'],
-        'kwargs': {'window': 20}
-    },
-    'turnover_bias': {
-        'func': 'calc_turnover_bias',
-        'fields': ['$turnover_rate_f'],
-        'kwargs': {'window': 20}
-    },
-    'turnover_vol': {
-        'func': 'calc_turnover_vol',
-        'fields': ['$turnover_rate_f'],
-        'kwargs': {'window': 20}
-    },
-    'turnover_ratio': {
-        'func': 'calc_turnover_ratio',
-        'fields': ['$turnover_rate_f'],
-        'kwargs': {'short_window': 10, 'long_window': 120}
-    },
-    'turnover_ma5': {
-        'func': 'calc_turnover_ma5',
-        'fields': ['$turnover_rate_f'],
-        'kwargs': {'window': 5}
-    },
-    # 成交额因子
-    'amount_std': {
-        'func': 'calc_amount_std',
-        'fields': ['$amount'],
-        'kwargs': {'window': 20}
-    },
     'amount_ma': {
         'func': 'calc_amount_ma',
         'fields': ['$amount'],
         'kwargs': {'window': 6}
     },
-    # 估值因子 (需要财报数据)
-    'peg_ratio': {
-        'func': 'calc_peg_ratio',
-        'fields': ['$pe_ttm'],
-        'financial_fields': ['netprofit_yoy'],
-        'kwargs': {}
-    },
-    # 历史波动率因子 (需要基准数据)
-    'history_sigma': {
-        'func': 'calc_history_sigma',
-        'fields': ['$close'],
-        'benchmark': 'sh000300',  # 沪深300作为基准
-        'kwargs': {'window': 250, 'half_life': 63}
-    },
-    # 收益率方差因子
-    'return_var': {
-        'func': 'calc_return_var',
-        'fields': ['$close'],
-        'kwargs': {'window': 121}
-    },
-    # 营业外收支占比因子 (纯财报因子)
-    'non_oper_ratio': {
-        'func': 'calc_non_oper_ratio',
-        'fields': [],  # 不需要日频价格数据
-        'financial_fields': ['non_oper_income', 'non_oper_exp', 'total_profit'],
-        'kwargs': {}
-    },
-    # 资产负债率同比变化因子 (独立计算，直接读取原始年报)
-    'debt_ratio_yoy': {
-        'func': 'calc_debt_ratio_yoy',
-        'fields': [],
-        'standalone': True,  # 独立计算，不需要 load_financial
-        'kwargs': {'start': '2020-01-01', 'end': '2025-12-17'}
-    },
 }
+
+# 本地因子配置 (从 local_factors.py 导入，不上传到 git)
+try:
+    from local_factors import LOCAL_FACTORS
+    FACTOR_MAP.update(LOCAL_FACTORS)
+except ImportError:
+    pass  # 本地因子配置不存在时跳过
 
 
 def calc_factor(factor_name: str, universe: str = 'csi1000'):
@@ -164,7 +94,7 @@ def calc_factor(factor_name: str, universe: str = 'csi1000'):
 
     # 配置参数
     stocks = universe
-    start = '2020-01-01'
+    start = config.get('start', '2020-01-01')  # 支持自定义开始日期
     from datetime import datetime
     end = datetime.now().strftime('%Y-%m-%d')
 
@@ -304,6 +234,161 @@ def list_factors():
     engine.list_factors()
 
 
+def combine_factors(factors: list, date: str, n_stocks: int = 30, ic_window: int = 63,
+                    ret_period: int = 21, universe: str = None, run_backtest_flag: bool = False):
+    """
+    IC加权多因子合成
+
+    Args:
+        factors: 因子名称列表
+        date: 目标日期
+        n_stocks: 选股数量
+        ic_window: IC计算窗口（默认63天/3个月）
+        ret_period: IC收益率周期（默认21天，与月度调仓匹配）
+        universe: 股票池（申万行业）
+        run_backtest_flag: 是否运行回测
+    """
+    from factor_production.combiner import FactorCombiner
+
+    print(f"\n{'='*60}")
+    print(f"IC加权多因子合成")
+    print(f"{'='*60}")
+    print(f"因子: {factors}")
+    print(f"日期: {date}")
+    print(f"IC窗口: {ic_window} 天")
+    print(f"收益率周期: {ret_period} 天")
+    print(f"选股数量: {n_stocks}")
+    print(f"{'='*60}\n")
+
+    combiner = FactorCombiner(
+        factors=factors,
+        ic_window=ic_window,
+        ret_period=ret_period
+    )
+
+    # 加载股票池
+    stocks = None
+    if universe:
+        from pathlib import Path
+        from datetime import datetime
+        instruments_file = Path(f'/home/zhenhai1/quantitative/qlib_data/cn_data/instruments/{universe}.txt')
+        if instruments_file.exists():
+            target_date = datetime.strptime(date, '%Y-%m-%d').date()
+            stocks = []
+            with open(instruments_file, 'r') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 3:
+                        stock = parts[0].upper()
+                        start = datetime.strptime(parts[1], '%Y-%m-%d').date()
+                        end = datetime.strptime(parts[2], '%Y-%m-%d').date()
+                        if start <= target_date <= end:
+                            stocks.append(stock)
+            print(f"股票池 {universe}: {len(stocks)} 只\n")
+
+    # 显示权重
+    combiner.summary(date)
+
+    # 选股
+    if n_stocks > 0:
+        selected = combiner.select_stocks(date, n_stocks=n_stocks, stocks=stocks)
+        print(f"\n综合因子选股 (前{n_stocks}只):")
+        print("-" * 40)
+        for i, s in enumerate(selected, 1):
+            print(f"  {i:2d}. {s}")
+        print("-" * 40)
+
+        # 保存到文件
+        output_file = f'/home/zhenhai1/mean_recursion/holdings_combined_{date.replace("-", "")}.txt'
+        with open(output_file, 'w') as f:
+            f.write('\n'.join(selected))
+        print(f"\n已保存到: {output_file}")
+
+    # 如果需要回测，使用向量化方式生成合成因子并运行回测
+    if run_backtest_flag:
+        print(f"\n{'='*60}")
+        print("生成合成因子并运行回测（向量化方式）...")
+        print(f"{'='*60}\n")
+
+        import polars as pl
+        from pathlib import Path
+
+        cache_dir = Path('/home/zhenhai1/quantitative/factor_production/cache')
+
+        # 加载所有因子数据
+        factor_dfs = {}
+        for factor_name in factors:
+            factor_files = list(cache_dir.glob(f"{factor_name}_*.parquet"))
+            if not factor_files:
+                print(f"错误: 找不到因子 {factor_name} 的缓存文件")
+                return combiner
+            df = pl.read_parquet(sorted(factor_files)[-1])
+            df = df.select(['stock', 'date', factor_name])
+            factor_dfs[factor_name] = df
+            print(f"  加载 {factor_name}: {len(df)} 行")
+
+        # 合并所有因子
+        print("\n合并因子数据...")
+        merged = factor_dfs[factors[0]]
+        for factor_name in factors[1:]:
+            merged = merged.join(factor_dfs[factor_name], on=['stock', 'date'], how='outer_coalesce')
+
+        print(f"  合并后: {len(merged)} 行")
+
+        # 按日期分组计算排名（百分位）
+        print("计算因子排名...")
+        for factor_name in factors:
+            merged = merged.with_columns(
+                (pl.col(factor_name).rank().over('date') / pl.col(factor_name).count().over('date'))
+                .alias(f'{factor_name}_rank')
+            )
+
+        # 使用最新权重（简化：使用固定权重而不是滚动权重）
+        # 因为历史滚动权重计算太慢，这里使用最新的权重
+        weights = combiner.get_weights(date)
+        print(f"\n使用权重: {weights}")
+
+        # 加权合成
+        print("加权合成...")
+        weighted_sum_expr = pl.lit(0.0)
+        for factor_name in factors:
+            w = weights.get(factor_name, 0)
+            weighted_sum_expr = weighted_sum_expr + pl.col(f'{factor_name}_rank').fill_null(0.5) * w
+
+        merged = merged.with_columns(weighted_sum_expr.alias('combined_factor'))
+        merged = merged.select(['stock', 'date', 'combined_factor'])
+        merged = merged.drop_nulls(subset=['combined_factor'])
+        merged = merged.sort(['date', 'stock'])
+
+        # 保存合成因子
+        dates = merged['date'].unique().sort().to_list()
+        start_date = str(dates[0])[:10].replace('-', '')
+        end_date = str(dates[-1])[:10].replace('-', '')
+        save_path = cache_dir / f"combined_factor_{start_date}_{end_date}.parquet"
+        merged.write_parquet(save_path)
+        print(f"\n合成因子已保存: {save_path}")
+        print(f"  记录数: {len(merged)}")
+        print(f"  日期范围: {dates[0]} ~ {dates[-1]}")
+
+        # 运行回测
+        print(f"\n{'='*60}")
+        print("运行回测...")
+        print(f"{'='*60}\n")
+
+        from backtest import BacktestEngine
+        engine = BacktestEngine()
+        result = engine.run(
+            factor='combined_factor',
+            direction='max',  # 合成因子越大越好
+            weight='equal',
+            n_stocks=n_stocks,
+            universe='csi1000',
+            rebalance='monthly'
+        )
+
+    return combiner
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='量化回测系统',
@@ -319,6 +404,10 @@ def main():
   python run_backtest.py -f volatility -d min -w max_sharpe      # 低波动最大夏普
   python run_backtest.py -f turnover_mean -d min -n 50           # 低换手50只
   python run_backtest.py -f history_sigma -d min -N              # 开启中性化
+
+  # IC加权多因子合成
+  python run_backtest.py --combine turnover_ratio,history_sigma,return_var --date 2025-12-31
+  python run_backtest.py --combine turnover_ratio,history_sigma -n 30 -u shenwan_select
 
   # 查看可用因子
   python run_backtest.py --list
@@ -351,6 +440,18 @@ def main():
     parser.add_argument('--neutralize', '-N', action='store_true',
                        help='开启因子中性化 (申万2级行业 + 流通市值)')
 
+    # IC加权多因子合成
+    parser.add_argument('--combine', '-C', type=str, metavar='FACTORS',
+                       help='IC加权合成多因子，逗号分隔 (如: turnover_ratio,history_sigma,return_var)')
+    parser.add_argument('--date', type=str, default=None,
+                       help='目标日期 (默认: 最新交易日)')
+    parser.add_argument('--ic-window', type=int, default=63,
+                       help='IC计算窗口天数 (默认: 63，约3个月)')
+    parser.add_argument('--ret-period', type=int, default=21,
+                       help='IC收益率周期天数 (默认: 21，与月度调仓匹配)')
+    parser.add_argument('--backtest', '-B', action='store_true',
+                       help='合成因子后运行回测')
+
     # 其他
     parser.add_argument('--list', action='store_true',
                        help='列出所有已计算的因子')
@@ -359,6 +460,17 @@ def main():
 
     if args.calc:
         calc_factor(args.calc, universe=args.universe)
+    elif args.combine:
+        # IC加权多因子合成
+        factors = [f.strip() for f in args.combine.split(',')]
+        date = args.date
+        if not date:
+            from datetime import datetime
+            date = datetime.now().strftime('%Y-%m-%d')
+        combine_factors(factors, date, n_stocks=args.n, ic_window=args.ic_window,
+                       ret_period=args.ret_period,
+                       universe=args.universe if args.universe != 'csi1000' else None,
+                       run_backtest_flag=args.backtest)
     elif args.list:
         list_factors()
     elif args.factor:
