@@ -26,7 +26,7 @@ import pandas as pd
 from tqdm import tqdm
 
 # 添加项目根目录
-sys.path.insert(0, '/home/zhenhai1/quantitative')
+sys.path.insert(0, '/home/yunbo/project/quantitative')
 
 # Tushare Token
 TUSHARE_TOKEN = 'a79f284e5d10967dacb6531a3c755a701ca79341ff0c60d59f1fcbf1'

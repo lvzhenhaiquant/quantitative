@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 # 添加项目根目录
-sys.path.insert(0, '/home/zhenhai1/quantitative')
+sys.path.insert(0, '/home/yunbo/project/quantitative')
 
 from utils.data_loader import DataLoader
 from backtest.backtester import Backtester, PerformanceAnalyzer
@@ -48,7 +48,7 @@ class BacktestEngine:
     """
 
     # 因子缓存目录
-    FACTOR_CACHE_DIR = '/home/zhenhai1/quantitative/factor_production/cache'
+    FACTOR_CACHE_DIR = '/home/yunbo/project/quantitative/factor_production/cache'
 
     # 默认配置
     DEFAULT_CONFIG = {
@@ -64,7 +64,7 @@ class BacktestEngine:
             'max_position': 0.10,
         },
         'output': {
-            'save_dir': '/home/zhenhai1/quantitative/backtest/results'
+            'save_dir': '/home/yunbo/project/quantitative/backtest/results'
         },
         'execution': {
             'trade_at_open': True,

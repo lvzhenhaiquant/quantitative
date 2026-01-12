@@ -86,7 +86,7 @@ class DataManager:
             data_path: 数据根目录，默认为 download_data
         """
         if data_path is None:
-            data_path = '/home/zhenhai1/quantitative/data/download_data'
+            data_path = '/home/yunbo/project/quantitative/data/download_data'
 
         self.data_path = Path(data_path)
         self.daily_path = self.data_path / 'daily'
@@ -338,6 +338,13 @@ class DataManager:
 
         # 5. 排序
         result_df = result_df.sort(['stock', 'date'])
+
+        # 6. 去重（按 stock + date 唯一，保留第一条）
+        before_dedup = result_df.shape[0]
+        result_df = result_df.unique(subset=['stock', 'date'], keep='first')
+        after_dedup = result_df.shape[0]
+        if before_dedup != after_dedup:
+            print(f"去重: {before_dedup} -> {after_dedup} (删除 {before_dedup - after_dedup} 条重复)")
 
         print(f"数据加载完成: {result_df.shape[0]} 行, {result_df.shape[1]} 列")
 
