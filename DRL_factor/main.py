@@ -1,13 +1,14 @@
+import numpy as np
+
 from RlEnv import FactorRLEnv
+from FactorToken import FactorTokenLibrary, RPNEncoder
 from PPOAgent import PPOAgent
-import utils.utils_tools as utils_tools
+import utils
 
 if __name__ == "__main__":
 
     env = FactorRLEnv()
     agent = PPOAgent(env, learning_rate=3e-4, batch_size=32)
-    # 进行模仿学习预训练
-    # agent.imitation_pretrain()
     agent.load_model()
 
     # 用于记录训练数据
@@ -30,14 +31,14 @@ if __name__ == "__main__":
         while step_count < collect_days: #总天数
             reward = agent.collect_experience_for_day(observation) #每天执行
             rewards.append(reward)
-            if step_count % 15 == 0: # 训练代理
+            if step_count % 5 == 0: # 训练代理
                 loss_info = agent.learn()
                 # 记录训练信息
                 actor_losses.append(loss_info['actor_loss'])
                 critic_losses.append(loss_info['critic_loss'])
                 entropies.append(loss_info['entropy'])
                 train_count += 1
-                utils_tools.show_loss_info(actor_losses, critic_losses, entropies,rewards)
+                utils.show_loss_info(actor_losses, critic_losses, entropies,rewards)
                 print(f"days进度：{step_count}/{collect_days},总执行进度：{total_steps}/{num_steps},训练轮次：{train_count}")
             # 保存模型
             if step_count % 100 == 0:

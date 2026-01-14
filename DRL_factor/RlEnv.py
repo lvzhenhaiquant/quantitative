@@ -6,10 +6,10 @@ from tensorflow import keras
 from tf_agents.environments import py_environment
 from tf_agents.specs import array_spec
 from tf_agents.trajectories import time_step as ts
-from utils.DataLoad import DataProcessor
+from DataLoad import DataProcessor
 from FactorToken import FactorTokenLibrary, RPNEncoder
-from utils.calculator import FactorCalculator
-import utils.utils_tools as utils_tools
+from calculator import FactorCalculator
+import utils
 
 #大模型调用包
 import os
@@ -32,7 +32,6 @@ class FactorRLEnv(py_environment.PyEnvironment):
         self.token_len = self.token_lib.token_max_length
         # 观测维度 = 数据特征维度
         self.observation_dim = len(self.data_processor.fields_origin)
-        self.ast_feature_dim = 9  # AST结构特征维度：depth, node_count, operator_count等
 
         # 使用 n 天的历史截面数据
         self.date_history_window_size = 3
@@ -46,19 +45,13 @@ class FactorRLEnv(py_environment.PyEnvironment):
         self.token_action = []
         self._episode_ended = False
         self.reward = {
-            "fail_token_invalid": -80,
-            "fail_ic": -50.0,
-            "fail_token_incomplete": -90,
+            "fail_token_invalid": -50,
+            "fail_ic": -100.0,
+            "fail_token_incomplete": -60,
             "fail_factor": -40.0,
-            "fail_history_factor": -100,
+            "fail_history_factor": -70,
             "fail_calculate_reward": -1,
-            "fail_token_invalid_partial": -70,
-            "structure_reward_weight": 0.1,  # 结构奖励权重
-            "subtree_closed_reward": 5.0,     # 子树闭合奖励
-            "balanced_structure_reward": 3.0,  # 结构平衡奖励
-            "depth_penalty_weight": 0.5,       # 深度惩罚权重
-            "max_depth_limit": 5               # 最大允许深度
-        }
+            } # self.reward[" "] 
 
         # 加载环境数据
         self.max_stock_num=1000
@@ -181,70 +174,21 @@ class FactorRLEnv(py_environment.PyEnvironment):
         token_seq_float = token_seq.astype(np.float32)
         current_data_feat = self._get_current_data_features()
 
-        # 获取AST结构特征
-        current_tokens = [self.action_space[i] for i in self.token_action]
-        ast_features = self.RPNEncoder.step_ast(current_tokens)
-        ast_feature_vector = np.array([
-            ast_features['depth'],
-            ast_features['node_count'],
-            ast_features['operator_count'],
-            ast_features['unary_operator_count'],
-            ast_features['binary_operator_count'],
-            ast_features['rolling_operator_count'],
-            ast_features['pair_rolling_operator_count'],
-            1.0 if ast_features['subtree_closed'] else 0.0,
-            1.0 if ast_features['valid_structure'] else 0.0
-        ], dtype=np.float32)
-        # 标准化AST特征
-        ast_feature_vector[0] = ast_feature_vector[0] / 10.0  # 深度标准化到0-1
-        ast_feature_vector[1] = ast_feature_vector[1] / self.token_len  # 节点数标准化
-        ast_feature_vector[2] = ast_feature_vector[2] / (self.token_len // 2)  # 操作符数标准化
-
-        token_seq_float = np.expand_dims(token_seq_float, axis=0) #历史窗口为n天，不需要扩展维度
+        token_seq_float = np.expand_dims(token_seq_float, axis=0) #历史窗口为10天，不需要扩展维度
         current_data_feat = np.expand_dims(current_data_feat, axis=0)
-        ast_feature_vector = np.expand_dims(ast_feature_vector, axis=0) #历史窗口为n天，不需要扩展维度
-        obs = [current_data_feat,token_seq_float,ast_feature_vector] #返回当前数据特征，token序列，ast特征
+        obs = [current_data_feat,token_seq_float]
         return obs
     
-    def _calculate_structure_reward(self, ast_features):
-        """计算AST结构奖励"""
-        reward = 0.0
-        
-        # 子树闭合奖励
-        if ast_features['subtree_closed']:
-            reward += self.reward['subtree_closed_reward']
-        
-        # 结构平衡奖励（节点数与操作符数的比例）
-        if ast_features['node_count'] > 0:
-            operator_ratio = ast_features['operator_count'] / ast_features['node_count']
-            # 理想比例约为 0.5（操作符数约为总节点数的一半）
-            balance_score = 1.0 - abs(operator_ratio - 0.5)
-            reward += balance_score * self.reward['balanced_structure_reward']
-        
-        # 深度惩罚（避免过深的树结构）
-        if ast_features['depth'] > self.reward['max_depth_limit']:
-            depth_excess = ast_features['depth'] - self.reward['max_depth_limit']
-            reward -= depth_excess * self.reward['depth_penalty_weight']
-        
-        # 结构有效性惩罚
-        if not ast_features['valid_structure']:
-            reward -= 5.0
-        
-        return reward * self.reward['structure_reward_weight']
+
     def _step(self, action):
         """执行动作"""
         if self._episode_ended:
             return self.reset()
         
         # 大模型阶段性介入
-        self.step_count += 1
+        self.step_count += 1 
         if self.step_count % self.large_model_interval == 0:
             self._large_model_intervention()
-        # # self.RPNEncoder._is_valid_factor_sequence()
-        # # 如果动作无效，不添加到序列，直接给出错误奖励
-        # temp_action = self.token_action + [action]
-        # if not self.RPNEncoder._is_valid_partial_sequence(temp_action):
-        #     return ts.transition(self._get_observation(), reward=self.reward["fail_token_invalid_partial"], discount=1.0)
         
         # 检查是否达到最大长度或结束符
         if len(self.token_action) >= self.token_len or self.action_space[action] == self.token_lib.SEP:
@@ -256,23 +200,19 @@ class FactorRLEnv(py_environment.PyEnvironment):
                 self._episode_ended = True
             return ts.termination(self._get_observation(), reward=reward)
         else:
-            # 添加动作并计算结构奖励
-            self.token_action.append(action)  
-            current_tokens = [self.action_space[i] for i in self.token_action]
-            # current_tokens = ["BEG", "close", "5", "EMA","close", "10", "EMA", "Sub", "SEP"]  # 测试用
-            ast_features = self.RPNEncoder.step_ast(current_tokens)
-            structure_reward = self._calculate_structure_reward(ast_features)
-            return ts.transition(self._get_observation(), reward=structure_reward, discount=1.0)
-
+            self.token_action.append(action)     
+        return ts.transition(self._get_observation(), reward=0.0, discount=1.0)
     def _calculate_reward(self):
         """使用实际金融数据计算因子的奖励""" 
+        def weighted_score(factor):
+            return (0.3 * factor['ic'] + 0.7 * factor['icir']) * 100
         # 1. 序列验证
         current_tokens = [self.action_space[i] for i in self.token_action]
         # current_tokens = ['BEG', 'close', 'high', 'Max', 'low', 'open', 'Min', 'Sub', '10', 'Mean', 'SEP']  # mean(max(close, high) - min(low), 10)
 
-        # # 检查是否以SEP结尾
-        # if not current_tokens[-1] == self.token_lib.SEP:
-        #     return self.reward["fail_token_incomplete"]  # 空值/不完整序列奖励为0
+        # 检查是否以SEP结尾
+        if not current_tokens[-1] == self.token_lib.SEP:
+            return self.reward["fail_token_incomplete"]  # 空值/不完整序列奖励为0
         
         # 检查是否符合逆波兰表达式规则
         if not self.RPNEncoder._is_valid_expression(current_tokens):
@@ -589,7 +529,7 @@ class FactorRLEnv(py_environment.PyEnvironment):
     def _change_token_from_deepseek(self, tokens_list):
         """调用DeepSeek修正无效的逆波兰表达式（后缀表达式），返回可执行的逆波兰token序列"""
         try:
-            deepseek_token = utils_tools.load_token_from_txt()
+            deepseek_token = utils.load_token_from_txt()
             client = OpenAI(api_key=deepseek_token,
                             base_url="https://api.deepseek.com")
 
@@ -639,7 +579,7 @@ class FactorRLEnv(py_environment.PyEnvironment):
         :return: 生成的因子列表，每个因子包含tokens、hash、ic、icir、timestamp等字段
         """
         try:
-            deepseek_token = utils_tools.load_token_from_txt()
+            deepseek_token = utils.load_token_from_txt()
             client = OpenAI(api_key=deepseek_token,
                             base_url="https://api.deepseek.com")
 
@@ -742,84 +682,6 @@ class FactorRLEnv(py_environment.PyEnvironment):
         for factor in new_factors:
             if len(self.alpha_pool) < self.alpha_pool_capacity:
                 self.alpha_pool.append(factor)
-
-    def generate_expert_factors(self, num_factors=10):
-        """调用DeepSeek API生成专家因子，直接返回与custom_expert_factors格式完全一致的二维列表
-        :param num_factors: 需要生成的因子数量，默认为10
-        :return: 生成的因子列表，格式与custom_expert_factors完全一致
-        """
-        try:
-            deepseek_token = utils_tools.load_token_from_txt()
-            client = OpenAI(api_key=deepseek_token,
-                            base_url="https://api.deepseek.com")
-
-            # 设计生成优质因子的提示词
-            system_prompt = f"""
-            你是金融因子逆波兰表达式（后缀表达式）生成专家，需生成具有良好预测能力的金融因子，严格遵守以下规则：
-            【核心要求】
-            1. 因子类型：生成用于股票价格预测的量化因子，重点关注量价指标的创新性组合
-            2. 预测能力：因子应具有较高的信息系数（IC）和信息系数秩相关系数（ICIR）
-            3. 表达式格式：必须使用逆波兰表达式（后缀表达式）格式
-            
-            【逆波兰表达式规则】
-            1. 结构：操作数（字段/常量）在前，运算符紧跟在对应操作数之后，无括号
-            2. 运算符匹配：
-            - 一元运算符（{self.token_lib.OPERATORS["unary"]}）：必须紧跟1个操作数后（如 Log(close) → close, Log）；
-            - 二元运算符（{self.token_lib.OPERATORS["binary"]}）：必须紧跟2个操作数后（如 close+1 → close, 1, Add）；
-            - rolling类运算符（{self.token_lib.OPERATORS["rolling"]}）：紧跟1个操作数后；pair_rolling紧跟2个操作数后；
-            3. 有效性：最终栈校验需通过（所有运算符有足够前置操作数，最终栈仅1个操作数）；
-            4. 长度限制：token序列长度不超过{self.token_lib.token_max_length}个token
-            5. 开头和结尾：必须以{self.token_lib.BEG}开头，以{self.token_lib.SEP}结尾
-            
-            【可用token范围】
-            - 字段：{self.token_lib.FIELDS}
-            - 常量：{[str(c) for c in self.token_lib.CONSTANTS]}
-            - 运算符：{self.token_lib.OPERATORS}
-            - 特殊标记：{self.token_lib.BEG}（开头）、{self.token_lib.SEP}（结束）
-            
-            【输出要求】
-            1. 生成{num_factors}个不同的因子，每个因子占一行
-            2. 每行仅返回逆波兰token序列（用逗号分隔），无需额外解释
-            3. 确保所有生成的因子都符合上述规则
-            4. 因子应具有多样性，避免重复或相似的模式
-            """
-            
-            user_prompt = f"请生成{num_factors}个优质的金融因子逆波兰表达式，每个表达式占一行，仅返回token序列。"
-
-            response = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                stream=False,
-                temperature=0.7  # 适当的随机性，保证因子多样性
-            )
-            # 解析生成的因子
-            generated_str = response.choices[0].message.content.strip()
-            factor_lines = generated_str.split('\n')
-            expert_factors = []
-            for i, line in enumerate(factor_lines):
-                if not line.strip():  # 跳过空行
-                    continue
-                try:
-                    tokens = [token.strip() for token in line.split(',')]
-                    # 验证生成的token序列
-                    if len(tokens) > 15 or tokens[0] != self.token_lib.BEG or tokens[-1] != self.token_lib.SEP:
-                        continue
-                    expert_factors.append(tokens)
-                    # 达到请求数量时停止
-                    if len(expert_factors) >= num_factors:
-                        break
-                except Exception as e:
-                    continue
-            return expert_factors
-        except (APIError, APIConnectionError, RateLimitError) as e:
-            print(f"DeepSeek API调用失败: {e}")
-            return []
-        except Exception as e:
-            print(f"生成因子时出错: {e}")
-            return []
 
     def _save_alpha_pool_to_local(self):
         """ 将因子池保存到本地CSV文件，每个值作为独立列 """
