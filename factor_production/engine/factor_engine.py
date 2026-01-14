@@ -30,7 +30,7 @@ class FactorEngine:
         self.dm = data_manager
 
         if cache_dir is None:
-            cache_dir = '/home/yunbo/project/quantitative/factor_production_v2/cache'
+            cache_dir = '/home/zhenhai1/quantitative/factor_production_v2/cache'
 
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)

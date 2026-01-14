@@ -463,7 +463,7 @@ class Backtester:
         self.trade_price_cache = {}
 
         # QLib 数据配置
-        self.qlib_path = config.get('qlib_path', '/home/yunbo/project/quantitative/qlib_data/cn_data')
+        self.qlib_path = config.get('qlib_path', '/home/zhenhai1/quantitative/qlib_data/cn_data')
         self.use_qlib = config.get('use_qlib', True)  # 默认使用 QLib 数据
         self._qlib_calendar = None
         self._qlib_calendar_index = None
@@ -957,12 +957,12 @@ class Backtester:
 
     def _load_qlib_prices(self, stocks: List[str], start_date: str, end_date: str) -> dict:
         """
-        从 QLib bin 文件加载价格数据到内存（后复权）
+        从 QLib bin 文件加载价格数据到内存
 
         Returns:
             {date_str: {stock: {'open': price, 'close': price}}}
         """
-        self.logger.info("从 QLib 加载价格数据（后复权）...")
+        self.logger.info("从 QLib 加载价格数据...")
 
         calendar = self._load_qlib_calendar()
         start_idx = self._qlib_calendar_index.get(start_date, 0)
@@ -978,55 +978,38 @@ class Backtester:
             if not stock_dir.exists():
                 return stock, None, None
 
-            # 读取开盘价、收盘价和复权因子
+            # 读取开盘价和收盘价
             open_file = stock_dir / 'open.day.bin'
             close_file = stock_dir / 'close.day.bin'
-            factor_file = stock_dir / 'factor.day.bin'
 
             open_start, open_data = self._read_qlib_bin(open_file)
             close_start, close_data = self._read_qlib_bin(close_file)
-            factor_start, factor_data = self._read_qlib_bin(factor_file)
 
             if open_data is None or close_data is None:
                 return stock, None, None
 
-            # 提取需要的日期范围（后复权）
+            # 提取需要的日期范围
             open_result = {}
             close_result = {}
-            last_factor = 1.0  # 用于前向填充
 
             for date in dates:
                 cal_idx = self._qlib_calendar_index[date]
 
-                # 获取复权因子（前向填充）
-                factor_val = 1.0
-                if factor_data is not None:
-                    factor_idx = cal_idx - factor_start
-                    if 0 <= factor_idx < len(factor_data):
-                        val = factor_data[factor_idx]
-                        if not np.isnan(val):
-                            factor_val = float(val)
-                            last_factor = factor_val
-                        else:
-                            factor_val = last_factor
-                    else:
-                        factor_val = last_factor
-
-                # 开盘价（后复权）
+                # 开盘价
                 if open_data is not None:
                     data_idx = cal_idx - open_start
                     if 0 <= data_idx < len(open_data):
                         val = open_data[data_idx]
                         if not np.isnan(val):
-                            open_result[date] = float(val) * factor_val
+                            open_result[date] = float(val)
 
-                # 收盘价（后复权）
+                # 收盘价
                 if close_data is not None:
                     data_idx = cal_idx - close_start
                     if 0 <= data_idx < len(close_data):
                         val = close_data[data_idx]
                         if not np.isnan(val):
-                            close_result[date] = float(val) * factor_val
+                            close_result[date] = float(val)
 
             return stock, open_result, close_result
 
