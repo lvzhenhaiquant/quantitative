@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import sys
 import pandas as pd
 import numpy as np
@@ -16,8 +17,6 @@ class DataProcessor:
         self.qlib_data_dir = qlib_data_dir
         self.RL_Data_dir= os.path.join("./RL_Data")
         self.DataManager = DataManager()
-        
-        
         
         self.fields_origin = ['open', 'high', 'low', 'close']
         self.qlib_fields = ["$" + field for field in  self.fields_origin]
@@ -37,12 +36,13 @@ class DataProcessor:
                     stocks=csi_code,  # DataManager会自动解析为指数成分股
                     start=start_date,
                     end=end_date,
-                    fields=self.fields,  # 使用您定义的fields
+                    fields=self.fields_origin,  # 使用您定义的fields
                     adjust=True  # 使用后复权价格
                 )
             if pl_data.is_empty():
                 print(f"警告: DataManager获取数据为空")
             pd_df  = pl_data.to_pandas()
+            Path(self.RL_Data_dir).mkdir(parents=True, exist_ok=True)
             pd_df.to_csv(file_name_data, index=False, encoding='utf-8-sig')
         return pd_df
         
@@ -77,6 +77,74 @@ class DataProcessor:
         data = data.dropna()
         
         return data
+    def normalize_min_max(self, data, fields=None):
+        """
+        对数据进行最大最小标准化
+        
+        参数:
+            data: 原始数据
+            fields: 需要标准化的字段列表，默认为所有价格字段
+            
+        返回:
+            标准化后的数据
+        """
+        if fields is None:
+            fields = self.fields_origin
+            
+        normalized_data = data.copy()
+        
+        # 按日期分组进行标准化
+        for field in fields:
+            if field in normalized_data.columns:
+                # 按日期分组
+                for date, group in normalized_data.groupby('date'):
+                    min_val = group[field].min()
+                    max_val = group[field].max()
+                    
+                    # 避免除以零
+                    if max_val != min_val:
+                        normalized_data.loc[normalized_data['date'] == date, field] = \
+                            (group[field] - min_val) / (max_val - min_val)
+                    else:
+                        normalized_data.loc[normalized_data['date'] == date, field] = 0.0
+        
+        return normalized_data
+    
+# 修改utils/DataLoad.py文件中的calculate_daily_volatility方法，使用百分比变化
+
+    def calculate_daily_volatility(self, data, fields=None):
+        """
+        使用百分比变化计算波动率并替换原始字段值
+        
+        参数:
+            data: 原始数据
+            fields: 需要计算波动率的字段列表，默认为所有非date和stock字段
+            
+        返回:
+            百分比变化数据替换后的新数据框
+        """
+        volatility_data = data.copy()
+        
+        # 获取所有非date和stock的字段
+        if fields is None:
+            fields = [col for col in volatility_data.columns if col not in ['date', 'stock']]
+        
+        # 按股票分组计算百分比变化
+        for stock, stock_data in volatility_data.groupby('stock'):
+            # 对每个字段计算百分比变化
+            for field in fields:
+                if field in volatility_data.columns:
+                    # 计算该股票的百分比变化
+                    # 使用pct_change()计算每日变化率
+                    pct_change = stock_data[field].pct_change()
+                    
+                    # 将百分比变化值替换回原数据框
+                    volatility_data.loc[stock_data.index, field] = pct_change
+        
+        # 处理NaN值（第一天的变化率）
+        volatility_data = volatility_data.fillna(0.0)  # 第一天的变化率设为0
+        
+        return volatility_data
     
     def get_pool_stocks_by_date(self, pool, date):
         """

@@ -3,9 +3,6 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow import keras
-from tf_agents.environments import py_environment
-from tf_agents.specs import array_spec
-from tf_agents.trajectories import time_step as ts
 from utils.DataLoad import DataProcessor
 from FactorToken import FactorTokenLibrary, RPNEncoder
 from utils.calculator import FactorCalculator
@@ -16,7 +13,7 @@ import os
 from openai import OpenAI
 from openai import APIError, APIConnectionError, RateLimitError
 
-class FactorRLEnv(py_environment.PyEnvironment):
+class FactorRLEnv():
     """因子生成强化学习环境"""
     
     def __init__(self):
@@ -39,24 +36,22 @@ class FactorRLEnv(py_environment.PyEnvironment):
         
         # 定义观测空间和动作空间
         self.action_space = self.token_lib.all_tokens
-        self._action_spec = array_spec.BoundedArraySpec(shape=(), dtype=np.int32, name='action')
-        # 定义观测空间：数据特征 (不包含Token序列)
-        self._observation_spec = array_spec.BoundedArraySpec(shape=(self.date_history_window_size,self.observation_dim), dtype=np.float32, name='observation')
+
         # 初始化状态
         self.token_action = []
         self._episode_ended = False
         self.reward = {
-            "fail_token_invalid": -80,
-            "fail_ic": -50.0,
-            "fail_token_incomplete": -90,
-            "fail_factor": -40.0,
-            "fail_history_factor": -100,
+            "fail_token_invalid": -8,
+            "fail_ic": -3.0,
+            "fail_token_incomplete": -9.0,
+            "fail_factor": -6.0,
+            "fail_history_factor": -10,
             "fail_calculate_reward": -1,
-            "fail_token_invalid_partial": -70,
-            "structure_reward_weight": 0.1,  # 结构奖励权重
-            "subtree_closed_reward": 5.0,     # 子树闭合奖励
-            "balanced_structure_reward": 3.0,  # 结构平衡奖励
-            "depth_penalty_weight": 0.5,       # 深度惩罚权重
+            "fail_token_invalid_partial": -7,
+            "structure_reward_weight": 2,  # 结构奖励权重
+            "subtree_closed_reward": 5,     # 子树闭合奖励
+            "balanced_structure_reward": 3,  # 结构平衡奖励
+            "depth_penalty_weight": 3,       # 深度惩罚权重
             "max_depth_limit": 5               # 最大允许深度
         }
 
@@ -67,9 +62,13 @@ class FactorRLEnv(py_environment.PyEnvironment):
         self.data = self.data_processor._preprocess_data(self.data_loader.load_data(self.csi_code,'2020-01-01', '2025-12-31'))
         self.data['date'] = pd.to_datetime(self.data['date'], errors='coerce').dt.date
         self.date_list = self.data['date'].dropna().sort_values().unique().tolist()
+        # 按日期缓存数据以加速访问
+        self.date_data_cache = {}
+        for date in self.date_list:
+            self.date_data_cache[date] = self._filter_date_from_pool(date)
 
         # 当前数据点
-        self._current_date_idx = self.date_history_window_size-1 #0 ,  由于历史窗口为10天，所以从第9天开始
+        self._current_date_idx = self.date_history_window_size-1 #0 ,  由于历史窗口为 n 天，所以从第 n-1 天开始
         self._current_data_features = self._get_current_data_features()
 
         # 日志文件路径
@@ -90,37 +89,41 @@ class FactorRLEnv(py_environment.PyEnvironment):
 
         self.ic_history = [] #记录ic用于计算icir
 
-        
-
-        
-    def action_spec(self):
-        return self._action_spec
-    def observation_spec(self):
-        return self._observation_spec
     def action_size(self):
         return len(self.action_space)
+    
+    def feature_size(self):
+        return self.observation_dim
     
     def is_last(self):
         """对外暴露的done判断接口，核心返回self.episode_done"""
         return self._episode_ended
     
-    def _reset(self):
+    def reset(self,date_idx_init = True):
         """重置环境"""
         self.token_action = [self.action_space.index(self.token_lib.BEG)]
         # 重置当前日期索引为0
-        self._current_date_idx = 0 #(self._current_date_idx + 1) % len(self.date_list)
+        if date_idx_init or self._current_date_idx >= len(self.date_list):
+            self._current_date_idx = 0
+        else:
+            self._current_date_idx +=1 #如果一个因子表达式算一个done的话，日期继续推进
         self._current_data_features = self._get_current_data_features()
         self._episode_ended = False
-        reset_result = ts.restart(self._get_observation())
-        return reset_result
+        reset_result = self._get_observation()
+        return reset_result , 0, self._episode_ended
     
     def _filter_date_from_pool(self,current_date):
+        # 先检查缓存
+        if current_date in self.date_data_cache:
+            return self.date_data_cache[current_date]
         date_data = self.data.loc[self.data['date'] == current_date]
         constituent_stocks = self.data_loader.get_pool_stocks_by_date(pool=self.csi_code,date=current_date.strftime("%Y-%m-%d"))
         if not constituent_stocks:
             return np.zeros(self.observation_dim)
         # 筛选当前日期的股票数据
         date_data = date_data[date_data['stock'].isin(constituent_stocks)]
+        # 缓存结果
+        self.date_data_cache[current_date] = date_data
         return date_data
 
  # 避免除零错误
@@ -130,11 +133,14 @@ class FactorRLEnv(py_environment.PyEnvironment):
         history_dates = []
         for i in range(self.date_history_window_size):
             date_idx = self._current_date_idx - i
-            if date_idx >= 0:
+            if date_idx >= 0 and date_idx < len(self.date_list):  # 添加对索引上限的检查
                 history_dates.append(self.date_list[date_idx])
-            else:
+            elif date_idx < 0:
                 # 如果历史窗口超过数据起始点，填充最早的日期
                 history_dates.append(self.date_list[0])
+            else:
+                # 如果历史窗口超过数据结束点，填充最晚的日期,在step最后一天 self._current_date_idx 仍然会+1，这里修缮一下
+                history_dates.append(self.date_list[-1])
         # 反转日期列表，使最新的日期在最后
         history_dates.reverse()
         
@@ -231,48 +237,46 @@ class FactorRLEnv(py_environment.PyEnvironment):
             reward -= 5.0
         
         return reward * self.reward['structure_reward_weight']
-    def _step(self, action):
+    def step(self, action):
         """执行动作"""
         if self._episode_ended:
-            return self.reset()
+            return self.reset(date_idx_init = False)
         
         # 大模型阶段性介入
         self.step_count += 1
         if self.step_count % self.large_model_interval == 0:
             self._large_model_intervention()
-        # # self.RPNEncoder._is_valid_factor_sequence()
-        # # 如果动作无效，不添加到序列，直接给出错误奖励
-        # temp_action = self.token_action + [action]
-        # if not self.RPNEncoder._is_valid_partial_sequence(temp_action):
-        #     return ts.transition(self._get_observation(), reward=self.reward["fail_token_invalid_partial"], discount=1.0)
         
+        # 添加索引范围检查
+        if self._current_date_idx >= len(self.date_list):
+            return self.reset(date_idx_init=True)
+        current_date = self.date_list[self._current_date_idx]
+
         # 检查是否达到最大长度或结束符
         if len(self.token_action) >= self.token_len or self.action_space[action] == self.token_lib.SEP:
             reward = self._calculate_reward()
             self._current_date_idx +=1
-            self.token_action = [self.action_space.index(self.token_lib.BEG)] # 重置动作序列
-            print(f"_current_date_idx:  {self.date_list[self._current_date_idx]}, reward: {reward}")
-            if self._current_date_idx >= len(self.date_list):#日期结束，重置
-                self._episode_ended = True
-            return ts.termination(self._get_observation(), reward=reward)
+            #日期结束，重置
+            # if self._current_date_idx >= len(self.date_list):
+            self._episode_ended = True #表达式结束
+            # 重置动作序列
+            self.token_action = [self.action_space.index(self.token_lib.BEG)] 
+            print(f"_current_date_idx:  {current_date}, action：{action} reward: {reward}")
+            return self._get_observation(),reward,self._episode_ended 
         else:
             # 添加动作并计算结构奖励
-            self.token_action.append(action)  
+            self.token_action.append(action)
             current_tokens = [self.action_space[i] for i in self.token_action]
-            # current_tokens = ["BEG", "close", "5", "EMA","close", "10", "EMA", "Sub", "SEP"]  # 测试用
             ast_features = self.RPNEncoder.step_ast(current_tokens)
             structure_reward = self._calculate_structure_reward(ast_features)
-            return ts.transition(self._get_observation(), reward=structure_reward, discount=1.0)
+            print(f"_current_date_idx:  {current_date}, action：{action} structure_reward: {structure_reward}")
+            return self._get_observation(),structure_reward,self._episode_ended 
 
     def _calculate_reward(self):
         """使用实际金融数据计算因子的奖励""" 
         # 1. 序列验证
         current_tokens = [self.action_space[i] for i in self.token_action]
         # current_tokens = ['BEG', 'close', 'high', 'Max', 'low', 'open', 'Min', 'Sub', '10', 'Mean', 'SEP']  # mean(max(close, high) - min(low), 10)
-
-        # # 检查是否以SEP结尾
-        # if not current_tokens[-1] == self.token_lib.SEP:
-        #     return self.reward["fail_token_incomplete"]  # 空值/不完整序列奖励为0
         
         # 检查是否符合逆波兰表达式规则
         if not self.RPNEncoder._is_valid_expression(current_tokens):
@@ -304,8 +308,10 @@ class FactorRLEnv(py_environment.PyEnvironment):
                 'ic': ic,
                 'icir': icir,
                 'timestamp': self.step_count,
-                'weighted_score': self._weighted_score(factor_info)
             }
+            # 2. 计算并添加加权分数
+            factor_info['weighted_score'] = self._weighted_score(factor_info)
+            
 
             # 存储当前评估结果到缓存
             self.factor_evaluation_cache[factor_hash] = {
@@ -322,6 +328,7 @@ class FactorRLEnv(py_environment.PyEnvironment):
                 reward  = self._weighted_score(factor_info)
                 # 写入文档
                 self._record_factor_expr(factor_info,reward)
+                self._save_alpha_pool_to_local()
                 return reward
             else:
                 # 替换前重新计算所有因子的最新表现
@@ -335,12 +342,14 @@ class FactorRLEnv(py_environment.PyEnvironment):
                     self.alpha_pool.append(factor_info)
                     # 成功入池，奖励为当前因子的加权评分
                     self._record_factor_expr(factor_info,reward)
+                    self._save_alpha_pool_to_local()
                     return reward
                 else:
                     # 无法入池，奖励为当前池最差因子的加权评分
                     reward = self._weighted_score(worst_factor)
                     return reward
         except Exception as e:
+            print(f"计算奖励失败: {e}")
             return self.reward["fail_calculate_reward"]
             
     def _weighted_score(self,factor):
@@ -408,7 +417,8 @@ class FactorRLEnv(py_environment.PyEnvironment):
         """
         # 获取当前日期的数据
         current_date = self.date_list[self._current_date_idx]
-        date_data = self._filter_date_from_pool(current_date)
+        # date_data = self._filter_date_from_pool(current_date)
+        date_data = self.date_data_cache[current_date]
         if date_data.empty:
             return np.array([])
         result = self._execute_node(factor_expr, date_data)
@@ -457,92 +467,121 @@ class FactorRLEnv(py_environment.PyEnvironment):
                 raise ValueError(f"Unknown operator: {operator}")
         else:
             raise ValueError(f"Unknown node type: {node_type}")
-    
-    def _calculate_ic_icir(self, factor_expr,factor_values):
-        """
-        计算IC和ICIR
-        IC：信息系数，衡量因子值与下期收益率的相关性
-        ICIR：信息比率，IC的平均值除以IC的标准差
-        """
-        current_date = self.date_list[self._current_date_idx]
-        date_data = self._filter_date_from_pool(current_date)
+ 
+    def _calculate_ic_icir(self, factor_expr, factor_values): 
+        """ 
+        计算IC和ICIR 
+        IC：信息系数，衡量因子值与下期收益率的相关性 
+        ICIR：信息比率，IC的平均值除以IC的标准差 
+        """ 
+        current_date = self.date_list[self._current_date_idx] 
+        date_data = self.date_data_cache[current_date] 
         
-        if date_data.empty:
-            return np.nan, np.nan
+        if date_data.empty: 
+            return np.nan, np.nan 
         
-        # 获取下一个交易日的收益率（作为目标）
-        next_date_idx = (self._current_date_idx + 1) % len(self.date_list)
-        if next_date_idx == 0:  # 如果是最后一个日期，无法获取下一日数据
-            return np.nan, np.nan
+        # 获取下一个交易日的收益率（作为目标） 
+        next_date_idx = self._current_date_idx + 1
+        if next_date_idx >= len(self.date_list):  # 如果是最后一个日期，无法获取下一日数据 
+            return np.nan, np.nan 
         
-        next_date = self.date_list[next_date_idx]
-        next_date_data = self._filter_date_from_pool(next_date)
+        next_date = self.date_list[next_date_idx] 
+        next_date_data = self.date_data_cache[next_date] 
         
-        if next_date_data.empty:
-            return np.nan, np.nan
+        if next_date_data.empty: 
+            return np.nan, np.nan 
         
-        # 计算IC（信息系数）
-        common_stocks = set(date_data['stock']).intersection(set(next_date_data['stock']))
-        if len(common_stocks) < 2:
-            return np.nan, np.nan
+        # 计算IC（信息系数）：筛选共同股票并按股票代码排序 
+        common_stocks = set(date_data['stock']).intersection(set(next_date_data['stock'])) 
+        if len(common_stocks) < 2:  # 至少需要2只股票才能计算相关性 
+            return np.nan, np.nan 
         
-        current_data_filtered = date_data[date_data['stock'].isin(common_stocks)].copy()
-        next_data_filtered = next_date_data[next_date_data['stock'].isin(common_stocks)].copy()
-        
-        current_data_filtered = current_data_filtered.sort_values('stock')
-        next_data_filtered = next_data_filtered.sort_values('stock')
-        
-        # 确保因子值与股票数据对齐
-        stock_list = date_data['stock'].tolist()
-        stock_to_factor = {stock_list[i]: factor_values[i] for i in range(min(len(stock_list), len(factor_values)))}  # 修正索引越界问题
-        
-        aligned_factor_values = []
-        stock_returns = []
-        
-        for stock in current_data_filtered['stock']:
-            if stock in stock_to_factor and stock in next_data_filtered['stock'].values:
-                factor_val = stock_to_factor[stock]
-                if not np.isnan(factor_val):
-                    aligned_factor_values.append(factor_val)
-                    
-                    # 计算收益率
-                    current_close = current_data_filtered[current_data_filtered['stock'] == stock]['close'].iloc[0]
-                    next_close = next_data_filtered[next_data_filtered['stock'] == stock]['close'].iloc[0]
-                    if current_close != 0:
-                        ret = (next_close - current_close) / current_close
-                        stock_returns.append(ret)
-        
-        if len(aligned_factor_values) < 2 or len(stock_returns) < 2:
-            return np.nan, np.nan
-        
-        # 计算当前IC
-        ic = np.corrcoef(aligned_factor_values, stock_returns)[0, 1]
-        self.ic_history.append(ic)
-        # 处理IC为NaN的情况
-        if np.isnan(ic):
-            ic = 0
-        #         
-        # 保持窗口大小
-        factor_windows = self._extract_factor_period(factor_expr)
-        ic_history_window = min(factor_windows, len(self.ic_history))
-        if len(self.ic_history) > ic_history_window:
-            self.ic_history.pop(0)
-        
-        # 计算ICIR：只有当有足够多的历史IC数据时才计算
-        icir = 0
-        if len(self.ic_history) >=ic_history_window:
-            ic_mean = np.mean(self.ic_history)
-            ic_std = np.std(self.ic_history)
-            
-            # 避免除以零
-            if ic_std != 0:
-                icir = ic_mean / ic_std
-            else:
-                icir = 0
-        # 记录IC到历史记录
-        
-        return ic, icir
+        current_data_filtered = date_data[date_data['stock'].isin(common_stocks)].sort_values('stock').reset_index(drop=True) 
+        next_data_filtered = next_date_data[next_date_data['stock'].isin(common_stocks)].sort_values('stock').reset_index(drop=True) 
 
+        # 确保股票顺序完全一致 
+        current_stocks = current_data_filtered['stock'].values 
+        next_stocks = next_data_filtered['stock'].values 
+        if not np.array_equal(current_stocks, next_stocks): 
+            return np.nan, np.nan 
+
+        # 步骤1：先提取收盘价，计算除零掩码（修正顺序：先算mask，再算收益率） 
+        current_close = current_data_filtered['close'].values.astype(np.float32) 
+        next_close = next_data_filtered['close'].values.astype(np.float32) 
+        
+        # 定义除零掩码（避免除以零，同时过滤收盘价为NaN的情况） 
+        mask = (current_close != 0) & (~np.isnan(current_close)) & (~np.isnan(next_close)) 
+        if np.sum(mask) < 2:  # 有效数据不足2个，无法计算相关性 
+            return np.nan, np.nan 
+
+        # 步骤2：计算有效股票的下期收益率（修正顺序：使用提前定义的mask） 
+        stock_returns = np.zeros_like(current_close, dtype=np.float32) 
+        valid_current_close = current_close[mask] 
+        valid_next_close = next_close[mask] 
+        stock_returns[mask] = (valid_next_close - valid_current_close) / valid_current_close 
+
+        # 步骤3：因子值对齐（严谨版：按长度对齐+过滤NaN） 
+        if len(factor_values) >= len(current_data_filtered): 
+            aligned_factor_values = factor_values[:len(current_data_filtered)] 
+        else: 
+            # 补NaN：仅补充缺失长度，不填充有效数值 
+            aligned_factor_values = np.pad( 
+                factor_values, 
+                (0, len(current_data_filtered) - len(factor_values)), 
+                'constant', 
+                constant_values=np.nan 
+            ) 
+        aligned_factor_values = aligned_factor_values.astype(np.float32) 
+
+        # 步骤4：过滤双重有效数据（因子值非NaN + 收益率有效） 
+        valid_mask = ~np.isnan(aligned_factor_values) & mask 
+        valid_factor_values = aligned_factor_values[valid_mask] 
+        valid_returns = stock_returns[valid_mask] 
+        
+        if len(valid_factor_values) < 2:  # 有效数据不足2个，无法计算相关性 
+            return np.nan, np.nan 
+
+        # 步骤5：计算当前IC（异常捕获+严谨处理NaN） 
+        ic = np.nan 
+        try: 
+            # 计算皮尔逊相关系数（[0,1] 对应因子与收益率的相关系数） 
+            corr_matrix = np.corrcoef(valid_factor_values, valid_returns) 
+            ic = corr_matrix[0, 1] 
+        except Exception as e: 
+            # 捕获相关性计算异常（如所有值相同） 
+            print(f"计算IC失败：{e}") 
+            ic = np.nan 
+
+        # 步骤6：仅将有效IC值存入历史（过滤NaN，避免稀释结果） 
+        if not np.isnan(ic): 
+            self.ic_history.append(ic) 
+        else: 
+            return np.nan, np.nan 
+
+        # 步骤7：维护IC历史窗口大小（先进先出，保持窗口长度不超过ic_history_window） 
+        factor_windows = self._extract_factor_period(factor_expr) 
+        ic_history_window = min(factor_windows, len(self.ic_history))  # 窗口大小不超过当前历史长度 
+        
+        # 裁剪历史列表：保持最新的ic_history_window个数据（先进先出） 
+        while len(self.ic_history) > ic_history_window: 
+            self.ic_history.pop(0) 
+
+        # 步骤8：计算ICIR（鲁棒性处理+避免除以零） 
+        icir = 0.0 
+        if len(self.ic_history) >= ic_history_window and ic_history_window >= 2: 
+            # 截取最新的ic_history_window个IC数据 
+            recent_ic_history = self.ic_history[-ic_history_window:] 
+            ic_mean = np.mean(recent_ic_history) 
+            ic_std = np.std(recent_ic_history) 
+            
+            # 定义极小值阈值，避免浮点精度问题导致的除以零 
+            min_std_threshold = 1e-8 
+            if ic_std > min_std_threshold: 
+                icir = ic_mean / ic_std 
+            else: 
+                icir = 0.0 
+
+        return ic*500, icir*500
     def _extract_factor_period(self, factor_expr):
         """
         从因子表达式中提取周期信息（返回所有滚动算子的最短周期）

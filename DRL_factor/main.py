@@ -24,13 +24,12 @@ if __name__ == "__main__":
     collect_days = 1454  # 每次收集的步数,总共回测的天数
     
     while total_steps < num_steps:
-        DRL_env = env.reset()
-        observation = DRL_env.observation
+        observation , _, _,= env.reset()
         step_count = 1
         while step_count < collect_days: #总天数
             reward = agent.collect_experience_for_day(observation) #每天执行
             rewards.append(reward)
-            if step_count % 15 == 0: # 训练代理
+            if step_count % 3 == 0: # 训练代理
                 loss_info = agent.learn()
                 # 记录训练信息
                 actor_losses.append(loss_info['actor_loss'])
@@ -39,11 +38,10 @@ if __name__ == "__main__":
                 train_count += 1
                 utils_tools.show_loss_info(actor_losses, critic_losses, entropies,rewards)
                 print(f"days进度：{step_count}/{collect_days},总执行进度：{total_steps}/{num_steps},训练轮次：{train_count}")
-            # 保存模型
-            if step_count % 100 == 0:
                 agent.save_model()
             step_count += 1
-        total_steps += collect_days
+        total_steps += 1
+    print("训练完成！")
 
 
 
