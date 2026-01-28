@@ -85,9 +85,8 @@ class DownloadDataFromTushare_Baostock:
             self.pro = ts.pro_api()
         except Exception as e:
             self.pro = None
-            print(f"Tushare初始化失败：{e}")
-        
-
+            print(f"Tushare初始化失败：{e}")  
+    
     def download_tushare_basic(self, start_date_str, end_date_str):
         if self.pro is None:
             print(f"Tushare初始化失败")
@@ -2978,13 +2977,13 @@ class DownloadDataFromTushare_Baostock:
                 print("[ updates_tushare_shenwan_constituent_stock ]下载日期设置错误")
                 return
         #------------
-        missing_start_end_list = self._utils_get_missing_date_ranges(old_start_str, old_end_str, start_date_str, end_date_str)
+        # missing_start_end_list = self._utils_get_missing_date_ranges(old_start_str, old_end_str, start_date_str, end_date_str)
         begin_all_str = min(old_start_str, old_end_str, start_date_str, end_date_str)  # 所有日期首位相连或者重叠后的最边际日期
         end_all_str = max(old_start_str, old_end_str, start_date_str, end_date_str)
-        for missing_start_str, missing_end_str in missing_start_end_list:
-            tmp_df = self._get_shenwan_daily_df(missing_start_str, missing_end_str)
-            if len(tmp_df) == 0:
-                print(f"获取constituent_stock数据为空{start_date_str} - {end_date_str}")
+        # for missing_start_str, missing_end_str in missing_start_end_list:
+        #     tmp_df = self._get_shenwan_daily_df(missing_start_str, missing_end_str)
+        #     if len(tmp_df) == 0:
+        #         print(f"获取constituent_stock数据为空{start_date_str} - {end_date_str}")
         #-----------
 
         

@@ -103,6 +103,20 @@ class RPNEncoder:
                     "str": f"{token}({operand['str']})"
                 }
                 stack.append(ast_node)
+            elif token in self.token_lib.OPERATORS["unary_rolling"]:
+                # 一元滚动运算符（如Atr等）
+                if len(stack) < 1:
+                    raise ValueError("Invalid RPN: 一元滚动运算符缺少操作数")
+                operand = stack.pop()
+                # 构建AST字典
+                ast_node = {
+                    "type": "operation",
+                    "operator": token,
+                    "operands": [operand],
+                    # 构建字符串：Atr(operand)
+                    "str": f"{token}({operand['str']})"
+                }
+                stack.append(ast_node)
             elif token in self.token_lib.OPERATORS["binary"]:
                 # 二元运算符（+/-/*/÷等）
                 if len(stack) < 2:
@@ -184,7 +198,7 @@ class RPNEncoder:
                 break
             if token in self.token_lib.FIELDS or token in [str(c) for c in self.token_lib.CONSTANTS]:
                 stack.append("operand")
-            elif token in self.token_lib.OPERATORS["unary"]:
+            elif token in self.token_lib.OPERATORS["unary"] or token in self.token_lib.OPERATORS["unary_rolling"]:
                 if len(stack) < 1:
                     return False
                 stack.pop()
@@ -384,87 +398,7 @@ class RPNEncoder:
                 'valid_structure': False
             }
 
-    #下面的可删除，仅用于测试
-    def _is_valid_partial_sequence(self, tokens):
-        """检查部分序列是否符合逆波兰表达式的部分规则"""
-        lib = self.token_lib
-        if not tokens:
-            return True
-        FIELDS = set(lib.FIELDS)
-        CONSTANTS = set(str(c) for c in lib.CONSTANTS)
-        UNARY = set(lib.OPERATORS['unary'])
-        BINARY = set(lib.OPERATORS['binary'])
-        ROLLING = set(lib.OPERATORS['rolling'])
-        PAIR_ROLLING = set(lib.OPERATORS['pair_rolling'])
 
-        BEG, SEP, PAD = lib.BEG, lib.SEP, lib.PAD
-        stack = 0
-        for idx, tok in enumerate(tokens):
-            # ---- BEG ----
-            if tok == BEG:
-                if idx != 0:
-                    return False
-                continue
-            # ---- PAD ----
-            if tok == PAD:
-                continue
-            # ---- SEP：前缀阶段只要求“已经形成表达式” ----
-            if tok == SEP:
-                return stack >= 1
-            # ---- 操作数（字段 or 常数）----
-            if tok in FIELDS or tok in CONSTANTS:
-                stack += 1
-                continue
-            # ---- rolling：需要2个操作数，生成1个新操作数（栈大小不变）----
-            if tok in ROLLING:
-                if stack < 2:
-                    return False
-                # 消耗2个操作数，生成1个新操作数，栈大小不变
-                continue
-            # ---- pair_rolling：需要3个操作数，生成1个新操作数（栈大小-2）----
-            if tok in PAIR_ROLLING:
-                if stack < 3:
-                    return False
-                # 消耗3个操作数，生成1个新操作数，栈大小-2
-                stack -= 2
-                continue
-            # ---- unary：需要1个操作数，生成1个新操作数（栈大小不变）----
-            if tok in UNARY:
-                if stack < 1:
-                    return False
-                # 消耗1个操作数，生成1个新操作数，栈大小不变
-                continue
-            # ---- binary：需要2个操作数，生成1个新操作数（栈大小-1）----
-            if tok in BINARY:
-                if stack < 2:
-                    return False
-                # 消耗2个操作数，生成1个新操作数，栈大小-1
-                stack -= 1
-                continue
-            # ---- 非法 token ----
-            return False
-        return True
-  
-    def _is_valid_factor_sequence(self):
-        generated_factors = [
-            ["BEG", "close", "open", "Sub", "SEP"],  # (close - open)
-            ["BEG", "close", "Log", "SEP"],  # Log(close)
-            ["BEG", "close", "5", "Mean", "SEP"],  # Mean(close, 5)
-            ["BEG", "high", "low", "Sub", "open", "Div", "SEP"],  # (high - low) / open
-            ["BEG", "close", "1", "Delta", "Abs", "SEP"],  # Abs(Delta(close, 1))
-            ["BEG", "close", "open", "Add", "2", "Div", "SEP"],  # (close + open) / 2
-            ["BEG", "close", "10", "Mean", "open", "Sub", "SEP"],  # Mean(close, 10) - open
-            ["BEG", "close", "high", "Less", "open", "Mul", "SEP"],  # (close < high) * open
-            ["BEG", "close", "low", "Max", "open", "Min", "SEP"],  # Min(Max(close, low), open)
-            ["BEG", "close", "5", "Std", "Log", "SEP"],  # Log(Std(close, 5))
-            ["BEG", "close", "open", "Div", "10", "Ref", "SEP"],  # Ref(close/open, 10)
-            ["BEG", "close", "high", "Mul", "low", "Sub", "SEP"],  # (close * high) - low
-            ["BEG", "close", "20", "Mean", "close", "Sub", "Abs", "SEP"],  # Abs(close - Mean(close, 20))
-            ["BEG", "close", "5", "EMA", "10", "EMA", "Sub", "SEP"],  # EMA(close, 5) - EMA(close, 10)
-        ]
-        for token in generated_factors:
-            flag =  self._is_valid_partial_sequence(token)
-            print(token, flag)
 
 
 

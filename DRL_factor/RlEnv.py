@@ -1,6 +1,7 @@
 import hashlib
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import spearmanr
 import tensorflow as tf
 from tensorflow import keras
 from utils.DataLoad import DataProcessor
@@ -32,7 +33,7 @@ class FactorRLEnv():
         self.ast_feature_dim = 9  # AST结构特征维度：depth, node_count, operator_count等
 
         # 使用 n 天的历史截面数据
-        self.date_history_window_size = 3
+        self.date_history_window_size = 5
         
         # 定义观测空间和动作空间
         self.action_space = self.token_lib.all_tokens
@@ -46,8 +47,9 @@ class FactorRLEnv():
             "fail_token_incomplete": -9.0,
             "fail_factor": -6.0,
             "fail_history_factor": -10,
+            "fail_duplicate_factor": -7,
             "fail_calculate_reward": -1,
-            "fail_token_invalid_partial": -7,
+            "fail_token_invalid_partial": -6,
             "structure_reward_weight": 2,  # 结构奖励权重
             "subtree_closed_reward": 5,     # 子树闭合奖励
             "balanced_structure_reward": 3,  # 结构平衡奖励
@@ -56,38 +58,43 @@ class FactorRLEnv():
         }
 
         # 加载环境数据
+        print("加载环境数据...")
         self.max_stock_num=1000
         self.csi_code = "csi1000"
         self.data_loader = DataProcessor()
-        self.data = self.data_processor._preprocess_data(self.data_loader.load_data(self.csi_code,'2020-01-01', '2025-12-31'))
+        self.data = self.data_processor._preprocess_data(self.data_loader.load_data(self.csi_code,'2020-01-01', '2026-01-19'))
         self.data['date'] = pd.to_datetime(self.data['date'], errors='coerce').dt.date
         self.date_list = self.data['date'].dropna().sort_values().unique().tolist()
         # 按日期缓存数据以加速访问
         self.date_data_cache = {}
         for date in self.date_list:
             self.date_data_cache[date] = self._filter_date_from_pool(date)
+        print("加载环境数据完成")
 
         # 当前数据点
         self._current_date_idx = self.date_history_window_size-1 #0 ,  由于历史窗口为 n 天，所以从第 n-1 天开始
         self._current_data_features = self._get_current_data_features()
 
-        # 日志文件路径
-        self.reward_file_csv = "./RL_Data/factor_expr_reward.csv"
+        # 文件路径
+        # self.reward_file_csv = "./RL_Data/factor_expr_reward.csv"
         self.alpha_pool_csv = "./RL_Data/alpha_pool.csv"
+        
+        self.factor_evaluation_cache = {}  # 存储因子在不同时间点的评估结果
         
         # AlphaPool因子池管理
         self.alpha_pool = []  # 因子池，容量上限10个
         self.alpha_pool_capacity = 10
         self.alpha_remove_num = 3 # 每次大模型介入剔除因子数量
         self.failed_factor_cache = set()  # 历史失败缓存因子
-
-        self.factor_evaluation_cache = {}  # 存储因子在不同时间点的评估结果
+        # 加载因子池
+        self._load_alpha_pool_from_local()
 
         # 大模型介入计数器
         self.step_count = 0
-        self.large_model_interval = 10
+        self.large_model_interval = 1000 #大模型介入间隔
 
         self.ic_history = [] #记录ic用于计算icir
+        self.ic_amplify = 50 #放大ic比例
 
     def action_size(self):
         return len(self.action_space)
@@ -237,6 +244,7 @@ class FactorRLEnv():
             reward -= 5.0
         
         return reward * self.reward['structure_reward_weight']
+    
     def step(self, action):
         """执行动作"""
         if self._episode_ended:
@@ -277,14 +285,14 @@ class FactorRLEnv():
         # 1. 序列验证
         current_tokens = [self.action_space[i] for i in self.token_action]
         # current_tokens = ['BEG', 'close', 'high', 'Max', 'low', 'open', 'Min', 'Sub', '10', 'Mean', 'SEP']  # mean(max(close, high) - min(low), 10)
-        
+        # current_tokens =["BEG", "close", "open", "Sub", "10", "Atr", "Div", "SEP"]
         # 检查是否符合逆波兰表达式规则
         if not self.RPNEncoder._is_valid_expression(current_tokens):
             return self.reward["fail_token_invalid"]  # 无效因子奖励
         
         # 2. AlphaPool环境评估
         try:
-            factor_expr = self.RPNEncoder.decode(current_tokens,return_type="dict")
+            factor_expr ,expr_str= self.RPNEncoder.decode(current_tokens,return_type="dict")
             factor_values = self._execute_factor(factor_expr)
             if len(factor_values) == 0 or np.all(np.isnan(factor_values)) or np.all(factor_values == 0):
                 return self.reward["fail_factor"]
@@ -293,9 +301,10 @@ class FactorRLEnv():
             ic, icir = self._calculate_ic_icir(factor_expr,factor_values)
             if np.isnan(ic) or np.isnan(icir):
                 return self.reward["fail_ic"]
+            print(f"进入因子池： {expr_str}")
               
             # 3. 因子池筛选
-            factor_hash = hashlib.md5(str(current_tokens).encode()).hexdigest()
+            factor_hash = hashlib.sha256(str(current_tokens).encode()).hexdigest()
 
             # 检查是否为历史失败因子
             if factor_hash in self.failed_factor_cache:
@@ -320,14 +329,17 @@ class FactorRLEnv():
                 'icir': icir,
                 'weighted_score': factor_info['weighted_score']
             }
-
+            # 检查因子是否已存在于池中
+            existing_hashes = [f['hash'] for f in self.alpha_pool]
+            if factor_hash in existing_hashes:
+                return self.reward["fail_duplicate_factor"]  # 重复因子奖励
+            
             reward = 0
             if len(self.alpha_pool) < self.alpha_pool_capacity:
                 # 成功入池，奖励为当前因子的加权评分
                 self.alpha_pool.append(factor_info)
                 reward  = self._weighted_score(factor_info)
                 # 写入文档
-                self._record_factor_expr(factor_info,reward)
                 self._save_alpha_pool_to_local()
                 return reward
             else:
@@ -341,7 +353,6 @@ class FactorRLEnv():
                     self.alpha_pool.remove(worst_factor)
                     self.alpha_pool.append(factor_info)
                     # 成功入池，奖励为当前因子的加权评分
-                    self._record_factor_expr(factor_info,reward)
                     self._save_alpha_pool_to_local()
                     return reward
                 else:
@@ -353,7 +364,8 @@ class FactorRLEnv():
             return self.reward["fail_calculate_reward"]
             
     def _weighted_score(self,factor):
-            return (0.3 * factor['ic'] + 0.7 * factor['icir']) * 100
+            return (0.7 * abs(factor['ic']) * 100 + 0.3 * abs(factor['icir'])) * 10
+    
     def _reevaluate_all_factors(self):
         """重新评估因子池中的所有因子，使用最新数据"""
         if not self.alpha_pool:
@@ -363,7 +375,7 @@ class FactorRLEnv():
         for factor in self.alpha_pool:
             try:
                 # 重新执行因子表达式
-                factor_expr = self.RPNEncoder.decode(factor['tokens'], return_type="dict")
+                factor_expr,_, = self.RPNEncoder.decode(factor['tokens'], return_type="dict")
                 factor_values = self._execute_factor(factor_expr)
                 
                 if len(factor_values) == 0 or np.all(np.isnan(factor_values)) or np.all(factor_values == 0):
@@ -371,7 +383,7 @@ class FactorRLEnv():
                     # 因子计算失败，设为极低分数
                     factor['ic'] -=1
                     factor['icir'] -=1
-                    factor['weighted_score'] -=100
+                    factor['weighted_score'] -=0
                     continue
                 
                 # 重新计算IC和ICIR
@@ -381,7 +393,7 @@ class FactorRLEnv():
                     # IC/ICIR计算失败，设为极低分数
                     factor['ic'] -=1
                     factor['icir'] -=1
-                    factor['weighted_score'] -=100
+                    factor['weighted_score'] -=0
                     continue
                 
                 # 更新因子的最新表现
@@ -417,7 +429,6 @@ class FactorRLEnv():
         """
         # 获取当前日期的数据
         current_date = self.date_list[self._current_date_idx]
-        # date_data = self._filter_date_from_pool(current_date)
         date_data = self.date_data_cache[current_date]
         if date_data.empty:
             return np.array([])
@@ -435,7 +446,6 @@ class FactorRLEnv():
             else:
                 # 如果字段不存在
                 return np.zeros(len(date_data))
-        
         elif node_type == 'constant':
             # 常量节点，返回常量值
             try:
@@ -448,15 +458,17 @@ class FactorRLEnv():
             # 操作符节点
             operator = node.get('operator')
             operands = node.get('operands', [])
-            
-            # 执行操作数
-            operand_values = [self._execute_node(op, date_data) for op in operands]
+            # 执行操作数 
+            operand_values = [self._execute_node(op, date_data) for op in operands] #如果是字段的话，会返回字段值数组，如max(close,open),获取滚动窗口值，下面的算子接口传入operands，有operands[1]获取
             
             # 根据操作符类型执行运算
             if operator in self.token_lib.OPERATORS["unary"]:
-                return self.calculator.execute_unary_op(operator, operand_values[0])
+                return self.calculator.execute_unary_op(operator, operand_values[0]) #一个算子，一个字段值
+            elif operator in self.token_lib.OPERATORS["unary_rolling"]:
+                # 一元滚动操作符，传递完整的操作数节点
+                return self.calculator.execute_unary_rolling_op(operator, operands, date_data, self.date_list, self.data) #一个算子，一个窗口常量滚动值
             elif operator in self.token_lib.OPERATORS["binary"]:
-                return self.calculator.execute_binary_op(operator, operand_values[0], operand_values[1])
+                return self.calculator.execute_binary_op(operator, operand_values[0], operand_values[1]) #一个算子，两个字段值
             elif operator in self.token_lib.OPERATORS["rolling"]:
                 # 滚动操作符，传递完整的操作数节点
                 return self.calculator.execute_rolling_op(operator, operands, date_data, self.date_list, self.data)
@@ -544,9 +556,12 @@ class FactorRLEnv():
         # 步骤5：计算当前IC（异常捕获+严谨处理NaN） 
         ic = np.nan 
         try: 
-            # 计算皮尔逊相关系数（[0,1] 对应因子与收益率的相关系数） 
-            corr_matrix = np.corrcoef(valid_factor_values, valid_returns) 
-            ic = corr_matrix[0, 1] 
+            # # 计算皮尔逊相关系数（[0,1] 对应因子与收益率的相关系数） 
+            # corr_matrix = np.corrcoef(valid_factor_values, valid_returns) 
+            # ic = corr_matrix[0, 1] 
+            
+            # 计算Spearman秩相关系数（RankIC）
+            ic, _ = spearmanr(valid_factor_values, valid_returns)
         except Exception as e: 
             # 捕获相关性计算异常（如所有值相同） 
             print(f"计算IC失败：{e}") 
@@ -581,7 +596,8 @@ class FactorRLEnv():
             else: 
                 icir = 0.0 
 
-        return ic*500, icir*500
+        return ic*self.ic_amplify, icir*self.ic_amplify
+    
     def _extract_factor_period(self, factor_expr):
         """
         从因子表达式中提取周期信息（返回所有滚动算子的最短周期）
@@ -746,7 +762,8 @@ class FactorRLEnv():
                         'hash': factor_hash,
                         'ic': 0.0,  # 初始值，后续会更新
                         'icir': 0.0,  # 初始值，后续会更新
-                        'timestamp': self.step_count
+                        'timestamp': self.step_count,
+                        'weighted_score': 0.0,  # 初始值，后续会更新
                     }
                     new_factors.append(new_factor)
                     # 达到请求数量时停止
@@ -865,24 +882,90 @@ class FactorRLEnv():
         try:
             # 准备保存数据
             save_data = []
+            valid_factors = []
+            invalid_count = 0
+            
             for factor in self.alpha_pool:
-                # 解码因子表达式为可读字符串
-                factor_expr_str = self.RPNEncoder.decode(factor['tokens'], return_type="string")
-                # 将tokens列表转换为逗号分隔的字符串
-                tokens_str = ",".join(factor['tokens'])
-                save_entry = {
-                    'hash': factor['hash'],
-                    'tokens': tokens_str,  # 逗号分隔的字符串格式
-                    'factor_expr': factor_expr_str,
-                    'ic': factor['ic'],
-                    'icir': factor['icir'],
-                    'timestamp': factor['timestamp']
-                }
-                save_data.append(save_entry)
-            df = pd.DataFrame(save_data)
-            df.to_csv(self.alpha_pool_csv, index=False, encoding='utf-8')
+                try:
+                    # 1. 验证因子token序列是否有效
+                    if not self.RPNEncoder._is_valid_expression(factor['tokens']):
+                        print(f"过滤无效因子表达式: {factor['hash']}")
+                        invalid_count += 1
+                        continue
+                    
+                    # 2. 解码因子表达式为可读字符串
+                    # 注意：decode方法在return_type="string"时正确返回字符串
+                    factor_expr_str = self.RPNEncoder.decode(factor['tokens'], return_type="string")
+                    
+                    # 3. 将tokens列表转换为逗号分隔的字符串
+                    tokens_str = ",".join(factor['tokens'])
+                    
+                    # 4. 构建保存条目
+                    save_entry = {
+                        'hash': factor['hash'],
+                        'tokens': tokens_str,  # 逗号分隔的字符串格式
+                        'factor_expr': factor_expr_str,
+                        'ic': factor['ic'],
+                        'icir': factor['icir'],
+                        'timestamp': factor['timestamp'],
+                        'weighted_score': factor['weighted_score'],
+                    }
+                    
+                    save_data.append(save_entry)
+                    valid_factors.append(factor)
+                    
+                except Exception as e:
+                    print(f"处理因子 {factor['hash']} 时出错: {e}")
+                    invalid_count += 1
+                    continue
+            
+            # 更新因子池，只保留有效因子
+            if invalid_count > 0:
+                print(f"共过滤掉 {invalid_count} 个无效因子，剩余 {len(valid_factors)} 个有效因子")
+                self.alpha_pool = valid_factors
+            
+            # 将有效因子保存到CSV文件
+            if save_data:
+                df = pd.DataFrame(save_data)
+                df.to_csv(self.alpha_pool_csv, index=False, encoding='utf-8')
+                print(f"成功保存因子池到本地: {self.alpha_pool_csv}，共包含 {len(save_data)} 个因子")
+            else:
+                print("没有有效因子需要保存")
+                
         except Exception as e:
             print(f"保存因子池到本地时出错: {e}")
+
+    def _load_alpha_pool_from_local(self):
+        # 加载已保存的因子池
+        try:
+            if os.path.exists(self.alpha_pool_csv):
+                df = pd.read_csv(self.alpha_pool_csv, encoding='utf-8')
+                for _, row in df.iterrows():
+                    # 将tokens从逗号分隔的字符串转换回列表
+                    tokens = row['tokens'].split(',')
+                    factor_entry = {
+                        'hash': row['hash'],
+                        'tokens': tokens,  # 列表格式
+                        'factor_expr': row['factor_expr'],
+                        'ic': row['ic'],
+                        'icir': row['icir'],
+                        'timestamp': row['timestamp'],
+                        'weighted_score': row['weighted_score'],
+                    }
+                    self.alpha_pool.append(factor_entry)
+                    self.factor_evaluation_cache[row['hash']] = {
+                        'current_date': pd.to_datetime(row['timestamp']),
+                        'ic': row['ic'],
+                        'icir': row['icir'],
+                        'weighted_score': factor_entry['weighted_score']
+                    }
+                print(f"成功加载因子池，共包含 {len(self.alpha_pool)} 个因子")
+            else:
+                print("未找到已保存的因子池文件，将使用空因子池")
+        except Exception as e:
+            print(f"加载因子池时出错: {e}")
+            self.alpha_pool = []  # 出错时使用空因子池
+
 
     def _record_factor_expr(self, factor_info, reward):
         """

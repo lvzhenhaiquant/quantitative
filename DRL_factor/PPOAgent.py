@@ -1,3 +1,4 @@
+from collections import deque
 import os
 import numpy as np
 import tensorflow as tf
@@ -47,7 +48,7 @@ class PPOAgent:
             self.strategy = tf.distribute.OneDeviceStrategy(device="/cpu:0")
         else:
             # 计算要使用的GPU数量：最多使用一半
-            num_gpus_to_use = num_physical_gpus // 2
+            num_gpus_to_use = num_physical_gpus // 4
             # 设置可见的GPU设备
             tf.config.set_visible_devices(physical_gpus[:num_gpus_to_use], 'GPU')
             # 创建MirroredStrategy
@@ -489,12 +490,14 @@ class PPOAgent:
 
 class ReplayBuffer:
     def __init__(self, batch_size):
-        self.states = []
-        self.probs = []
-        self.vals = []
-        self.actions = []
-        self.rewards = []
-        self.dones = []
+        self.max_size = 10000
+        self.states = deque(maxlen=self.max_size)
+        self.probs = deque(maxlen=self.max_size)
+        self.vals = deque(maxlen=self.max_size)
+        self.actions = deque(maxlen=self.max_size)
+        self.rewards = deque(maxlen=self.max_size)
+        self.dones = deque(maxlen=self.max_size)
+        self.batch_size = batch_size
         self.batch_size = batch_size
 
     def store_memory(self, state, action, probs, vals, reward, done):  # 将数据加入buffer
@@ -504,7 +507,6 @@ class ReplayBuffer:
         self.vals.append(vals)
         self.rewards.append(reward)
         self.dones.append(done)
- # 从buffer中采样数据,数量为batch_size
  
     def generate_batches(self):
         """
@@ -529,22 +531,20 @@ class ReplayBuffer:
         start = np.random.randint(0, max_start + 1)
         end = start + self.batch_size
         batches.append([
-            self.states[start:end],
-            self.actions[start:end],
-            self.probs[start:end],
-            self.vals[start:end],
-            self.rewards[start:end],
-            self.dones[start:end],
+            list(self.states)[start:end],  # 转换为列表以便切片操作
+            list(self.actions)[start:end],
+            list(self.probs)[start:end],
+            list(self.vals)[start:end],
+            list(self.rewards)[start:end],
+            list(self.dones)[start:end],
         ])
 
         return batches
 
-
-
     def clear_memory(self):
-        self.states = []
-        self.probs = []
-        self.actions = []
-        self.rewards = []
-        self.dones = []
-        self.vals = []
+        self.states = deque(maxlen=self.max_size)
+        self.probs = deque(maxlen=self.max_size)
+        self.actions = deque(maxlen=self.max_size)
+        self.rewards = deque(maxlen=self.max_size)
+        self.dones = deque(maxlen=self.max_size)
+        self.vals = deque(maxlen=self.max_size)

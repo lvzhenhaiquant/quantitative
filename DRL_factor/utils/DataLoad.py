@@ -18,7 +18,7 @@ class DataProcessor:
         self.RL_Data_dir= os.path.join("./RL_Data")
         self.DataManager = DataManager()
         
-        self.fields_origin = ['open', 'high', 'low', 'close']
+        self.fields_origin = ['open', 'high', 'low', 'close', 'volume', 'turnover_rate', 'pe', 'ps', 'dv_ratio', 'free_share','change','circ_mv']
         self.qlib_fields = ["$" + field for field in  self.fields_origin]
 
         qlib.init(provider_uri=qlib_data_dir, region='cn')
@@ -30,13 +30,15 @@ class DataProcessor:
     def load_data(self, csi_code, start_date, end_date):
         file_name_data = os.path.join(self.RL_Data_dir,f"{csi_code}_{start_date}_{end_date}.csv")
         if os.path.exists(file_name_data):
+            print(f"从本地文件加载数据: {file_name_data}")
             pd_df = pd.read_csv(file_name_data)
         else:
+            print(f"从qlib加载数据")
             pl_data = self.DataManager.load(
                     stocks=csi_code,  # DataManager会自动解析为指数成分股
                     start=start_date,
                     end=end_date,
-                    fields=self.fields_origin,  # 使用您定义的fields
+                    fields=self.qlib_fields,  # 使用您定义的fields
                     adjust=True  # 使用后复权价格
                 )
             if pl_data.is_empty():
@@ -68,15 +70,14 @@ class DataProcessor:
         返回:
             预处理后的数据
         """
-        # 处理缺失值
-        # data = data.fillna(method='ffill')  # 前向填充
-        data = data.fillna(method='bfill')  # 后向填充
-        
         # 处理无穷值
-        data = data.replace([np.inf, -np.inf], np.nan)
-        data = data.dropna()
-        
+        data.replace([np.inf, -np.inf], np.nan, inplace=True)
+        # 处理缺失值
+        # data.ffill(inplace=True)	  # 前向填充
+        data.bfill(inplace=True)  # 后向填充
+        data.dropna(inplace=True)
         return data
+    
     def normalize_min_max(self, data, fields=None):
         """
         对数据进行最大最小标准化

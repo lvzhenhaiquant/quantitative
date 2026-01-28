@@ -4,9 +4,9 @@ import numpy as np
 
 
 
-def show_loss_info(actor_losses, critic_losses, entropies, rewards, window_size=10):
+def show_loss_info(actor_losses, critic_losses, entropies, rewards, window_size=30):
     # 绘制训练损失图
-    plt.figure(figsize=(30, 20))
+    plt.figure(figsize=(15, 30))
     # 计算移动窗口均值
     actor_ma = moving_average(actor_losses, window_size)
     critic_ma = moving_average(critic_losses, window_size)
@@ -56,6 +56,7 @@ def show_loss_info(actor_losses, critic_losses, entropies, rewards, window_size=
     x_range = range(len(rewards_ma)) if len(rewards) < window_size else range(window_size-1, len(rewards))
     plt.plot(x_range, rewards_ma, label=f'Rewards MA ({window_size})', color='red')
     plt.title('Rewards during Training')
+    plt.yscale('log')
     plt.xlabel('Episode')
     plt.ylabel('Rewards')
     plt.legend()

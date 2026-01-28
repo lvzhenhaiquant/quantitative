@@ -12,6 +12,9 @@ class FactorCalculator:
                                 # 实例：
                                 # - Abs(close): 计算收盘价的绝对值
                                 # - Log(open): 计算开盘价的自然对数
+        "unary_rolling": ["Atr"],  # 一元滚动操作符
+                                # 实例：
+                                # -Atr(14)等同于 Atr(high, low, close, 14): 计算14天的平均真实波幅
         
         "binary": ["Add","Avg", "Sub", "Mul", "Div", "Greater", "Less", "Max", "Min"],  # 二元操作符：需要两个操作数
                                                                                 # 实例：
@@ -309,3 +312,81 @@ class FactorCalculator:
             return result
         
         return np.zeros(len(date_data))
+    
+
+    def execute_unary_rolling_op(self, operator, operands, date_data, date_list, data):
+        """
+        执行一元滚动操作符
+        :param operator: 操作符名称
+        :param operands: 窗口大小数值
+        :param date_data: 当前日期的数据
+        :param date_list: 日期列表
+        :param data: 完整数据集
+        :return: 计算结果
+        """
+        if not date_data.empty:
+            current_date = date_data['date'].iloc[0]
+            stocks = date_data['stock'].tolist()
+            
+            # 获取当前日期在日期列表中的索引
+            current_date_idx = date_list.index(current_date)
+            
+            # 确保窗口大小不超过当前日期索引
+            window = min(current_date_idx, operands)
+            
+            # 获取需要的历史数据范围
+            start_date_idx = max(0, current_date_idx - window + 1)
+            history_dates = date_list[start_date_idx:current_date_idx + 1]
+            
+            # 获取历史数据
+            history_data = data[data['date'].isin(history_dates) & data['stock'].isin(stocks)]
+            
+            if history_data.empty:
+                return np.zeros(len(date_data))
+            
+            # 按股票分组计算
+            result_dict = {}
+            for stock in stocks:
+                stock_data = history_data[history_data['stock'] == stock].sort_values('date')
+                if stock_data.empty:
+                    result_dict[stock] = 0.0
+                    continue
+                
+                match operator:
+                    case 'Atr':
+                        # 计算平均真实波幅 (ATR)
+                        # 从stock_data中获取high、low、close数据
+                        high = stock_data['high'].values.astype(np.float32)
+                        low = stock_data['low'].values.astype(np.float32)
+                        close = stock_data['close'].values.astype(np.float32)
+                        
+                        if len(high) < window:
+                            result_dict[stock] = 0.0
+                            continue
+                        
+                        # 计算真实波幅 (TR)
+                        tr = np.zeros_like(high)
+                        tr[0] = high[0] - low[0]  # 第一个周期的TR
+                        
+                        for i in range(1, len(high)):
+                            tr_high_low = high[i] - low[i]
+                            tr_high_prev_close = abs(high[i] - close[i-1])
+                            tr_low_prev_close = abs(low[i] - close[i-1])
+                            tr[i] = max(tr_high_low, tr_high_prev_close, tr_low_prev_close)
+                        # 计算ATR：前(period-1)个周期的ATR的平均值加上当前周期的TR，再除以period
+                        # 这里使用简单移动平均计算ATR
+                        atr = np.zeros_like(tr)
+                        atr[window-1] = np.mean(tr[:window])  # 第一个ATR值
+                        for i in range(window, len(tr)):
+                            atr[i] = (atr[i-1] * (window - 1) + tr[i]) / window
+                        # 返回最新的ATR值
+                        result_dict[stock] = atr[-1]
+                    case _:
+                        raise ValueError(f"Unknown execute_unary_rolling_op operator: {operator}")
+            
+            # 将结果按照date_data中的股票顺序排列
+            result = np.array([result_dict.get(stock, 0.0) for stock in stocks], dtype=np.float32)
+            return result
+        
+        return np.zeros(len(date_data))
+
